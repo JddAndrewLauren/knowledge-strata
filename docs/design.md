@@ -28,8 +28,12 @@ Setup is one command per project, run in the folder that will hold it:
     strata init --corpus <path> [--corpus <path> ...] [--manuscript <path>]
 
 It writes `.strata/config.yaml`, registers the server in that folder's
-`.mcp.json`, installs the skill and the reader agent at user level if they are
-not already there, and runs the first index. After that the user types
+`.mcp.json`, allowlists the tools and the skill's commits in
+`.claude/settings.json`, makes the folder a git repository if it is not one,
+creates `notes/project.md`, installs the skill and the reader agent at user
+level, and runs the first index. Run again with flags it replaces the paths;
+run bare in an initialized folder it is the refresh (re-sync, rewrite the
+user-level files). The full contract is on wayfinder #7. After that the user types
 `claude` in that folder, or opens it in the Claude Desktop app's Code tab,
 which is the same runtime (decided 2026-09-08, see the research note
 `docs/research/claude-desktop-hosting.md`).
@@ -38,15 +42,23 @@ which is the same runtime (decided 2026-09-08, see the research note
 
 A project is a folder. The tool serves any number of them.
 
-- **Per project:** `.strata/config.yaml` (corpus roots, manuscript path),
-  `.strata/ledger.db` (durable: ids, versions, anchor identity - never
-  dropped), `.strata/cache/index.db` (derived, disposable), `notes/`,
-  `.mcp.json`. Opening a Claude Code session in the folder is what selects
-  the project; the server is started by that folder's `.mcp.json` with the
-  folder as its argument.
+- **Per project:** `.strata/config.yaml` (exactly the corpus roots and
+  manuscript path the user typed, nothing else), `.strata/ledger.db`
+  (durable: ids, versions, anchor identity - never dropped),
+  `.strata/cache/index.db` (derived, disposable), `notes/`, `.mcp.json`, and
+  a `.claude/settings.json` allowlist so the two tools and the skill's
+  commits never prompt. The folder is a git repository the user never
+  manages: `init` creates it if absent, `.gitignore` holds only
+  `.strata/cache/`, and the skill commits at the end of each task (decided
+  2026-09-08, wayfinder #7). Opening a Claude Code session in the folder is
+  what selects the project; the server is started by that folder's
+  `.mcp.json` with the folder as its argument.
   There is no "current project" concept and no project parameter on any tool.
 - **Per user:** the skill, the reader agent definition, and a conversion and
-  embedding cache at `~/.strata/cache/` keyed by raw-unit content hash.
+  embedding cache at `~/.strata/cache/store.db` keyed by raw-unit content
+  hash plus converter id (text) plus embedding model id (vectors), with the
+  embedder's model files beside it. Everything under `~/.strata/cache/` is
+  disposable.
   Normalizing a file and embedding its paragraphs are functions of immutable
   bytes, so a second project over the same archive pays nothing for them.
 - **Shared between projects:** a corpus, by listing the same root in both
@@ -90,7 +102,8 @@ Everything the index knows arrives as a Record:
 
     ref         durable or positional, see Refs
     kind        source | note | manuscript
-    type        note only: person | event | theme | project | digest
+    type        note only: the note's folder under notes/ (open vocabulary;
+                project and digest are reserved)
     date        ISO date or empty, with confidence: exact | inferred | unknown
     date_text   the source's own wording, for display
     title       extractive gist: subject line, first sentence, heading
@@ -104,9 +117,9 @@ real:
 - **Sources adapter.** Walks the corpus roots, calls the normalizer for text
   and the dating module for the date, allocates stable ids through a manifest
   ledger (memoria ADR-0006 survives). Emits kind `source`.
-- **Notes adapter.** Reads `notes/**/*.md` as they are. Owns the frontmatter
-  contract: `type`, `aliases`, `window`. Validates it; a note that fails is
-  indexed with a warning, not dropped. Emits kind `note`.
+- **Notes adapter.** Reads `notes/**/*.md` as they are; the type is the
+  folder. Owns the frontmatter contract: `aliases`, `window`. Validates it; a
+  note that fails is indexed with a warning, not dropped. Emits kind `note`.
 - **Manuscript adapter.** Reads the manuscript folder as it is, heading-aware.
   Emits kind `manuscript`.
 
@@ -148,7 +161,10 @@ of memoria's `references.py` - see "What is reused", not the whole module).
   text they cited. Memoria's positional anchors that shift silently on edit
   are the failure this prevents.
 - **Manuscript refs are positional.** `manuscript/ch24.md # heading`. Never
-  finer, never stored in a note as if durable.
+  finer, never stored in a note as if durable. The skill enforces this by
+  instruction (cite by file and heading, quote an ambiguous heading rather
+  than number it); nothing detects, and no `is_durable` predicate is built
+  until something calls it (wayfinder #7).
 - **Note refs are paths.** `notes/people/dave.md`. A note is small enough to
   read whole.
 
@@ -237,12 +253,29 @@ chapter, not cleanup.
 
 A small, named interface, owned by the notes adapter, not a convention:
 
-    type      person | event | theme | project | digest
-    aliases   list of strings; `who` filters expand through them
-    window    from, to; digests only; the header's coverage check reads it
+    aliases   list of strings; `who` filters expand through them, whatever
+              the note's type
+    window    from, to; optional on any note; the header's coverage check
+              reads it from `notes/digest/` only
 
-Three fields, validated in one place. The skill teaches the agent to write
-them; the adapter is the only code that parses them.
+Two optional fields, validated in one place. The skill teaches the agent to
+write them; the adapter is the only code that parses them.
+
+The note's **type is its folder**: `notes/<type>/<slug>.md`, singular. Two
+names are reserved because code depends on them: `notes/project.md`, the one
+project note the skill reads first (created by `init`), and `notes/digest/`,
+whose files are named by window (`2001-06-01--2001-06-30.md`). The skill
+teaches `person`, `event` and `theme` as a starting vocabulary and the agent
+may coin others (`place`, `company`, `deal`). Nothing filters by type; search
+surfaces every note by text and aliases alike.
+
+Notes other than digests and the project note accrete from answers: after a
+question or a chapter, the agent saves a note when the answer was about a
+person, event, theme or other thing and none exists, or appends when one
+does. The slug is the canonical name (the user's form if given, else the
+fullest form the sources use) and is never renamed, because the path is a
+ref. Aliases are seeded from the name forms seen while answering. Before a
+note exists, `who` is a plain match on the string given.
 
 ### Fan-out: one cheap reader agent, one protocol
 

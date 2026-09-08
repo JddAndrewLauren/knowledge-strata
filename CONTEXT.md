@@ -25,7 +25,7 @@ produces version n+1; refs do not carry a version, and resolve against the newes
 kind.
 
 **Durable ref** - resolves to the same text indefinitely, or says it was retired.
-Source refs and bare file paths. `refs.is_durable` answers this.
+Source refs and bare file paths. A vocabulary term, not a predicate in code.
 
 **Positional ref** - points inside a live artifact and can rot or silently
 retarget. A manuscript ref carrying a heading. Never stored in a note as if
@@ -57,10 +57,24 @@ pair.
 **Title** (also **gist**) - the extractive one-liner every hit carries, so a scan
 of many hits is cheap. Adapter-supplied, never empty, never model-written.
 
-**Note type** - `person`, `event`, `theme`, `project` or `digest`. Notes only.
+**Note type** - the folder a note sits in under `notes/`, singular
+(`person`, `place`, `deal`). An open vocabulary; `person`, `event` and `theme`
+are the starting set. Two names are reserved because code depends on them:
+`project.md` and `digest/`.
 
-**Window** - a digest's coverage, `from` and `to`. Digests only; the search
-header's coverage check reads it.
+**Project note** - `notes/project.md`, the one note the skill reads first.
+Each chapter write appends a paragraph to it. Created by init, never renamed.
+
+**Digest** - a note under `notes/digest/`, named by its window, written by a
+reader for one fan-out chunk. The only note type whose window the header
+treats as coverage.
+
+**Window** - a note's declared coverage, `from` and `to`. Optional on any note;
+the search header's coverage check reads it from digests only.
+
+**Alias** - another name form a note answers to (first name, email address,
+initials). Seeded from the forms seen when the note is created. The `who`
+filter expands through the aliases of every note, whatever its type.
 
 ## Storage
 
@@ -88,6 +102,19 @@ copied from the corpus.
 memoir over the corpus with its notes and a machine-local config template. Both
 the thing shown working end to end and the fixture source for the manuscript and
 notes adapters.
+
+## Project folder
+
+**Project** - a folder holding `.strata/`, `notes/`, `.mcp.json` and a
+`.claude/settings.json` allowlist. Also a git repository the user never
+manages: init creates it, the skill commits at the end of each task, and there
+is no remote.
+
+**Refresh** - a bare `strata init` in an initialized folder: re-sync and
+rewrite the user-level skill and reader agent. How a new version reaches them.
+
+**Cache** - anywhere named `cache/`, at project or user level. Disposable by
+definition; deleting it costs time, never citations.
 
 ## Host
 
