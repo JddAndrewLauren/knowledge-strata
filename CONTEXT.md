@@ -76,3 +76,15 @@ decisions cheap and deterministic.
 
 **Drift report** - what a reconversion tells the user changed. Contents not yet
 decided.
+
+## Stand-ins
+
+**Stand-in** - invented material that takes the place of a side of the system the
+real corpus lacks (a manuscript, a note set, a docx with a template date) so the
+decision about that side can be made and tested rather than deferred. Never
+copied from the corpus.
+
+**Demo project** - the one committed stand-in, `examples/west-desk/`: a short
+memoir over the corpus with its notes and a machine-local config template. Both
+the thing shown working end to end and the fixture source for the manuscript and
+notes adapters.
