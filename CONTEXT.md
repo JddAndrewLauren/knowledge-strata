@@ -88,3 +88,10 @@ copied from the corpus.
 memoir over the corpus with its notes and a machine-local config template. Both
 the thing shown working end to end and the fixture source for the manuscript and
 notes adapters.
+
+## Host
+
+**Host** - what runs the agent: Claude Code, as the CLI or the Claude Desktop
+app's Code tab (one runtime). Not Desktop chat and not Cowork, which lack a
+working directory, a write path and model-selectable sub-agents. Decided
+2026-09-08; the facts are in `docs/research/claude-desktop-hosting.md`.

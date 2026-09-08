@@ -30,7 +30,9 @@ Setup is one command per project, run in the folder that will hold it:
 It writes `.strata/config.yaml`, registers the server in that folder's
 `.mcp.json`, installs the skill and the reader agent at user level if they are
 not already there, and runs the first index. After that the user types
-`claude` in that folder.
+`claude` in that folder, or opens it in the Claude Desktop app's Code tab,
+which is the same runtime (decided 2026-09-08, see the research note
+`docs/research/claude-desktop-hosting.md`).
 
 ## Multi-project
 
