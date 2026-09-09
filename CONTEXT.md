@@ -165,6 +165,11 @@ Reduction alone cannot confer coverage.
 another starts and before context pressure. Includes completed/pending assignments,
 filters, revisions, saved digest/reduction links and gaps. Fresh sessions start
 from the bounded project overview and follow these links.
+Growing completion records live in bounded linked recovery notes, separating
+whole-record completion from server-issued read segments. A reader returns before
+its progress record exceeds the digest cap. After batch note writes invalidate
+cursors, a fresh plan reuses verified source completion only at the unchanged
+corpus revision; changed notes/manuscript require fresh reads.
 
 **Reply size** - the estimated tokens of a search or read reply, stated at
 its end so the skill can tell when a session should compact.

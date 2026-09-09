@@ -16,10 +16,14 @@ An executable assignment cursor from `search`, its original query/date/who/kind
 scope, index and corpus revisions, estimated reading cost, and optional question.
 For rereading covered sources the caller may instead supply an ordinary search
 cursor for that scope. Never infer a bounded slice from first/last refs.
+On restart, the caller may supply bounded saved completion records. Skip only
+the completed source records or server-identified segments verified at the same
+corpus revision; changed notes/manuscript require fresh reads. Preserve links
+to supplied completion records, and report newly completed work separately.
 
 ## Procedure
 
-1. Execute the supplied `search` cursor. Preserve all original filters and the
+1. Execute the supplied `search` cursor alone. Preserve all original filters and the
    assignment selection; do not replace a query with browse or drop who/kind.
 2. Follow server-issued search continuations until the assignment is exhausted.
    Follow required metadata pages too. 100/500 hit caps are page sizes, not
@@ -38,6 +42,10 @@ cursor for that scope. Never infer a bounded slice from first/last refs.
    state and arranges a restart. Never join text from different revisions.
    Use known capacity with a 200k fallback, reserve at least half for other
    context/output, and return before the next read threatens the reserve.
+   Also stop before additional progress would make the completion record exceed
+   the digest cap. Include exact newly completed refs/segment selections and
+   pending continuations within that cap; never truncate the completion record
+   to imply a finished assignment. Link only manifests the caller supplied.
 5. Fill every template section. Factual findings cite source paragraph anchors
    (`SRC-000184 p17`), not cursors. Quotes come only from exact `read` payloads.
    Report exact dates as days, inferred dates at their displayed granularity,
@@ -57,6 +65,9 @@ cursor for that scope. Never infer a bounded slice from first/last refs.
 - **Length cap: 1,200 words for the whole digest.** Cut the least
   consequential bullets first, then quotes, never the frontmatter or the
   section headings or scope and limitations.
+- A partial invocation is not a completed assignment. Reserve report space for
+  recovery before reading; if even one progress item cannot fit, report the
+  capacity limit without claiming that item complete.
 - Quotes are copied from `read` output exactly. Never from a snippet, never
   paraphrased inside quotation marks.
 - Report what the records say. No interpretation, no adjectives about mood or

@@ -409,7 +409,15 @@ Protocol, in the skill:
 3. Run at most four readers concurrently. Follow all server continuations;
    interrupted/invalidated work remains explicitly incomplete.
 4. Persist every returned digest and batch recovery state before starting another
-   batch. Readers write nothing; the caller saves their reports, including gaps.
+   batch. Wait for that batch's readers before note writes invalidate cursors.
+   Readers write nothing; the caller saves their reports, including gaps. A reader
+   returns early before either context or its 1,200-word report fills, retaining
+   exact completion and continuation details. Store growing completion records in
+   bounded linked recovery notes. After note writes, replan invalidated cursors
+   and pass relevant saved completion records to fresh readers; retain verified
+   source completion only at an unchanged corpus revision. Neither tool offers a
+   per-call assignment-size setting. If a restart cannot make bounded progress,
+   report the limitation without claiming completeness.
 5. Reduce groups of at most four saved digests into cited summaries of at most
    1,200 words. Persist each reduction; recursively reduce groups of at most four
    when needed. Every level preserves child links, source citations, omissions,

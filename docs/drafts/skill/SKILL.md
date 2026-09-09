@@ -25,9 +25,12 @@ initial settings to validate, not measured host guarantees.
 | `summary_max_words` | 1200 | cap per persisted reduction |
 | `project_max_words` | 2000 | cap for the current project overview |
 
-Apply the capacity calculation separately to each reader. If its assignment
-cannot fit, persist incomplete progress and request smaller server assignments;
-do not assume a larger model window. Persist before the next batch or operation
+Apply the capacity calculation separately to each reader. An assignment may take
+several reader invocations: persist incomplete progress and resume its server
+continuations in a fresh reader. The tools have no per-call chunk-size control;
+do not invent one or silently change project config. If restarting cannot make
+progress within capacity, preserve the unfinished scope and explain the limit.
+Persist before the next batch or operation
 would consume the reserve, and sooner on any host context warning.
 
 ## The two tools
@@ -71,7 +74,8 @@ reply_tokens    ~5400
   corpus revision. Read limitations before reuse. Search remains able to
   enumerate covered sources when a question needs omitted detail.
 - `chunks` contain executable assignment cursors, including split days or
-  oversized records. Pass them intact with their recorded filters and scope.
+  oversized records. Give the reader their recorded filters and scope as context;
+  execute the cursor alone, without reconstructing tool arguments.
 - Unknown dates remain included; partial dates filter by period overlap.
   Deduplicate record refs across restarted or overlapping plans. Reread changed
   records. An invalidated cursor requires restarting its original scope;
@@ -141,14 +145,18 @@ text. Use the reading depth appropriate to the request above.
 
 Readers are `strata-reader` subagents: they return a digest in a fixed shape
 and write nothing. Their enumeration procedure and digest template are in the
-companion [reader definition](../agents/strata-reader.md).
+installed `strata-reader` agent definition (`~/.claude/agents/strata-reader.md`).
 
 1. Search the scope and follow planning continuations. Assess eligible coverage
    against the question; stale summaries may still contain supported findings
    but cannot suppress new reading.
 2. Read directly only if evidence cost fits the remaining unreserved budget.
    Otherwise pass each executable assignment cursor, its original query/date/
-   who/kind scope and question to a reader. Use ordinary search continuations
+   who/kind scope, revisions, estimated cost and question to a reader. On restart,
+   supply relevant bounded completion records from saved recovery notes; readers
+   skip only verified completed work at the unchanged corpus revision. Source
+   completion cannot justify skipping changed notes or manuscript text.
+   Use ordinary search continuations
    to reread covered spans; coverage never removes hits.
 3. Tell the user how many readers will cover what span and why. Run at most
    `reader_concurrency` at once. Use the reader default model; override to
@@ -156,12 +164,18 @@ companion [reader definition](../agents/strata-reader.md).
 4. Readers follow server continuations and preserve assignment scope. Persist
    every digest verbatim, including incomplete reports, under
    `notes/digest/<from>--<to>[-N].md` (use a unique descriptive scope for undated
-   or open-ended assignments). Save the batch before starting another.
+   or open-ended assignments). Wait for the batch's readers to finish before
+   writing notes, so these writes do not invalidate other readers mid-page.
+   Save the batch before starting another.
 5. Update a linked recovery note with the task, original filters, index/corpus
    revisions, completed and pending assignments, interrupted cursors, digest
    paths and gaps. Cursors are hints for resumption; validate them before reuse.
    If invalidated, restart that scope and reconcile record completion at the
-   new revision. Batch note writes also invalidate pending index cursors: get
+   new revision. Keep detailed completion records in bounded linked recovery
+   notes; keep only the active slice and links in the recovery overview. Record
+   whole-record versus segment completion separately, retaining server-issued
+   selection details. Never invent a completion list or link a reader did not
+   supply. Batch note writes also invalidate pending index cursors: get
    a fresh plan, retaining verified completed source reads when corpus revision
    is unchanged. Never promote interrupted work to complete coverage.
 6. Reduce at most four saved digests at a time to a cited summary of at most
@@ -217,8 +231,9 @@ aliases: [Dave, D. Fuller, dave.fuller@example.com]
 - **Sources**: `SRC-000184 p17`, for exact persistent wording. A `p17-22` run traverses
   current document order between live endpoints, not numeric labels; cite
   individual anchors when preserving exact quotations across future edits.
-- **Dates**: `exact` as a day. `inferred` at its own granularity - `2013-11
-  (folder)`, `2013` - never as a day. `undated` stays undated.
+- **Dates**: preserve displayed granularity and confidence. An inferred day
+  remains an inferred day; an inferred month or year (`2013-11 (folder)`,
+  `2013`) never becomes an invented day. `undated` stays undated.
 - **Manuscript**: file and heading, `manuscript/ch24.md # The Letter`, in the
   project note and nowhere finer. A repeated heading is quoted, never numbered.
 - **Notes**: the bare path.
