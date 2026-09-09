@@ -12,36 +12,48 @@ after it.
 
 ## Input
 
-A chunk row from a search header, and optionally a question to read for:
+A chunk row from a search header (or a date range requiring rereading), the
+original `query`, `who` and `kind` filters, and optionally a question to read for:
 
 ```
 2001-07-01..2001-07-16   271 records  ~76000
-2001-07-17..2001-07-17   612 records  ~140000   first SRC-000312 p1  last SRC-000923 p4
+2001-07-17..2001-07-17   212 records  ~60000   first SRC-000312 p1  last SRC-000523 p4
 ```
 
 ## Procedure
 
-1. `search` with an empty query, `from` and `to` set to the row's dates. This
-   is a timeline browse: up to 500 hits in date order.
-2. If the row carries `first` and `last`, the day was split. Read only the
-   records from `first` to `last` in the order the browse lists them, and stop
-   at `last`.
-3. If the header says `shown 500 of N` and there are no bounds, split the range
-   in half and browse each half.
+1. `search` with the supplied filters and the assigned dates. Never silently
+   replace a query with an empty browse or drop `who` or `kind`: the size
+   estimate applies to the original search. Ignore digest coverage when
+   enumerating the assigned sources; search hits still include covered days.
+2. If fewer hits are shown than matched, split a multi-day range into disjoint
+   date halves and search each with the same filters. Deduplicate record refs:
+   undated and inferred-date records may appear in both. Stop splitting at a
+   single day or when narrowing cannot reduce the overflow. The tool has no
+   pagination; report unreachable results as a gap, never infer their IDs.
+3. If the row carries `first` and `last`, read only its bounded run when both
+   bounds and the intervening records can be established in timeline order.
+   Ranked query hits cannot establish that order. If bounds are missing or
+   order cannot be established, report the bounded assignment as incomplete.
 4. `read` each record whole by its bare id (`SRC-000184`). If a reply ends in a
    continuation ref, pass it back to `read` until the record is finished.
 5. If a question was given, weight what you keep toward it, but still fill
    every section.
-6. Fill the template. Every bullet carries the ref of the paragraph it came
+6. Fill the template. Every factual finding carries the ref of the paragraph it came
    from, in the canonical form the hit showed (`SRC-000184 p17`). Dates: an
    exact date as a day; an inferred date as the hit showed it (`2013-11
    (folder)`), never as a day; `undated` as `undated`.
+7. State the original filters, bounds, question, reading completeness and gaps
+   in *Scope and limitations*. Distinguish reading every assigned record from
+   retaining every detail. Declare `window` frontmatter only for a complete,
+   unfiltered, unbounded reading of the whole date window; otherwise omit the
+   frontmatter entirely. A failed or unfinished read makes the digest incomplete.
 
 ## Limits
 
 - **Length cap: 1,200 words for the whole digest.** Cut the least
   consequential bullets first, then quotes, never the frontmatter or the
-  section headings.
+  section headings or scope and limitations.
 - Quotes are copied from `read` output exactly. Never from a snippet, never
   paraphrased inside quotation marks.
 - Report what the records say. No interpretation, no adjectives about mood or
@@ -59,6 +71,12 @@ window:
 ---
 # Digest 2001-07-01..2001-07-16
 
+## Scope and limitations
+- Search: <query, who, kind; use "none" for absent filters>; bounds: <refs or none>.
+- Focus: <question or general reading>. Reading: <complete or incomplete>.
+- Gaps: <unreachable results, unfinished reads, or none>. This summary omits
+  detail; absence from it is not evidence of absence from the archive.
+
 ## What happened
 - 2001-07-02  <one line, one event>  (SRC-000184 p17)
 - 2001-07-02  <...>  (SRC-000191 p3)
@@ -73,6 +91,6 @@ window:
 > "<verbatim sentence or two>"  - <Full Name>, 2001-07-05, SRC-000203 p8
 ```
 
-Replace the dates in the frontmatter and heading with the row's own `from` and
-`to`. Keep the four section headings exactly as written; eight digests are
-merged by heading.
+Replace the dates in the heading and any eligible frontmatter with the assigned
+`from` and `to`. Keep the five section headings exactly as written. When digests
+are combined, preserve each one's scope and gaps alongside its findings.
