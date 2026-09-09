@@ -33,7 +33,11 @@ It writes `.strata/config.yaml`, registers the server in that folder's
 creates `notes/project.md`, installs the skill and the reader agent at user
 level, and runs the first index. Run again with flags it replaces the paths;
 run bare in an initialized folder it is the refresh (re-sync, rewrite the
-user-level files). The full contract is on wayfinder #7. After that the user types
+user-level files). First indexing reports progress and interruption/recovery state.
+Until it completes, every tool reply declares `indexing: incomplete`; partial
+results never imply a complete archive or earn digest coverage. Installation,
+updates and recovery on macOS and Windows require the acceptance demonstrations
+in `docs/acceptance.md`. The full contract is on wayfinder #7. After that the user types
 `claude` in that folder, or opens it in the Claude Desktop app's Code tab,
 which is the same runtime (decided 2026-09-08, see the research note
 `docs/research/claude-desktop-hosting.md`).
@@ -42,8 +46,9 @@ which is the same runtime (decided 2026-09-08, see the research note
 
 A project is a folder. The tool serves any number of them.
 
-- **Per project:** `.strata/config.yaml` (exactly the corpus roots and
-  manuscript path the user typed, nothing else), `.strata/ledger.db`
+- **Per project:** `.strata/config.yaml` (the corpus roots and
+  manuscript path the user typed, plus optional `chunk_tokens`, default 80,000;
+  init writes only paths), `.strata/ledger.db`
   (durable: ids, versions, anchor identity - never dropped),
   `.strata/cache/index.db` (derived, disposable), `notes/`, `.mcp.json`, and
   a `.claude/settings.json` allowlist so the two tools and the skill's
@@ -100,7 +105,7 @@ interface; anything not named there is internal.
 
 Everything the index knows arrives as a Record:
 
-    ref         durable or positional, see Refs
+    ref         source anchor or live artifact reference, see Refs
     kind        source | note | manuscript
     type        note only: the note's folder under notes/ (open vocabulary;
                 project and digest are reserved)
@@ -111,7 +116,10 @@ Everything the index knows arrives as a Record:
     title       extractive gist: subject line, first sentence, heading
     paragraphs  text, in order
     aliases     note only
-    window      digest only: from, to
+    window      note only: optional from, to
+    corpus_revision  digest only: optional server-issued source revision
+    coverage_complete  digest only: optional boolean; true only for a completed
+                       source-wide window reading at that revision
 
 Three adapters produce Records, and their existence is what makes the seam
 real:
@@ -120,7 +128,8 @@ real:
   and the dating module for the date, allocates stable ids through a manifest
   ledger (memoria ADR-0006 survives). Emits kind `source`.
 - **Notes adapter.** Reads `notes/**/*.md` as they are; the type is the
-  folder. Owns the frontmatter contract: `aliases`, `window`. Validates it; a
+  folder. Owns the frontmatter contract: `aliases`, `window`, `corpus_revision`,
+  `coverage_complete`. Validates it; a
   note that fails is indexed with a warning, not dropped. Emits kind `note`.
 - **Manuscript adapter.** Reads the manuscript folder as it is, heading-aware.
   Emits kind `manuscript`.
@@ -163,9 +172,11 @@ Two shapes, decided by kind, one module with no dependencies (a clean slice
 of memoria's `references.py` - see "What is reused", not the whole module).
 
 - **Source refs are durable.** `SRC-000184 p17`. A source record is frozen
-  the first time it is indexed: its paragraph text and anchors do not change.
+  at paragraph granularity: an anchor never changes its exact stored text.
   If the raw file changes or a converter is bumped, reconversion produces a
-  new version silently; anchors that vanish are retired and their text kept
+  new version silently; only exactly equal paragraph text keeps an anchor (including punctuation,
+  capitalization and whitespace). Identical duplicates pair in document order.
+  Changed or vanished paragraphs retire and their text is kept
   in the ledger, so old refs keep resolving to the frozen text they cited
   and `read` says when one is retired (wayfinder #15). There is no drift
   report artifact. Memoria's positional anchors that shift silently on edit
@@ -175,11 +186,17 @@ of memoria's `references.py` - see "What is reused", not the whole module).
   instruction (cite by file and heading, quote an ambiguous heading rather
   than number it); nothing detects, and no `is_durable` predicate is built
   until something calls it (wayfinder #7).
-- **Note refs are paths.** `notes/people/dave.md`. A note is small enough to
-  read whole.
+- **Note refs are paths.** `notes/person/dave.md`. Paths name live artifacts;
+  they do not freeze wording. All notes can be read through bounded pages.
+- **Ranges traverse document order.** `p17-22` includes both live endpoint
+  anchors and everything between them in current document order, regardless of
+  numeric labels; `p17-` means the current tail. Missing/retired endpoints
+  produce an explicit diagnostic, with retired text available by single anchor,
+  rather than silently retargeting a range. Reversed endpoints are an error.
+  Ranges locate live passages; cite individual anchors for exact persistent text.
 
-Search emits the right shape per kind, so a digest can only ever cite what
-will still be there.
+Search emits the right shape per kind. Digest evidence cites source anchors;
+notes and manuscript paths remain live context references.
 
 ### Index
 
@@ -197,19 +214,87 @@ reused.
 reciprocal rank fusion inside the module. Filters: date range, `who`
 (expanded through note aliases), `kind`. Returns a **header** then hits:
 
-    header  total hits; estimated tokens; counts by month;
+    header  lexical_total; evidence_total; estimated tokens; counts by month;
             digests already covering the window; suggested chunks
             for the configured chunk budget
     hit     ref, date, kind, title, snippet in context
 
 The header is what makes fan-out decisions cheap and deterministic. The
 skill reads it and acts; it never counts, estimates or partitions in prose.
-The field-by-field contract (one hit per record, `chunk_tokens` default
-80,000, RRF and limits, `who` expansion, coverage, the `read` cap and the
-plain-text wire form) is on wayfinder #10, decided 2026-09-08.
+The revised contract below supersedes the original resolution on #10.
+One hit per record and RRF k=60 with equal weights remain. `who` expands
+matching note titles, stems and aliases into an FTS phrase predicate shared
+by both branches; unknown dates pass, partial dates use period overlap.
+Browse orders by date then ref, unknown last; query results order by fused
+relevance with stable ref ties.
 
-**Read.** `read(ref)` returns a paragraph, a range or a whole record,
-verbatim, capped, with a ref to continue.
+**Evidence and budgets.** A query evidence set is all lexical matching
+paragraphs plus the top 200 semantic paragraphs under identical filters,
+deduplicated into records. RRF ranks this set; lexical results are not truncated
+at 200. `lexical_total` explicitly counts lexical records and paragraphs;
+`evidence_total` counts the union. `tokens`, `by_month`, `undated`, `inferred`
+and reader assignments describe full records in that same evidence set, never
+lexical-only costs for hybrid results. Browse has no semantic cutoff and can
+enumerate the entire filtered archive. Semantic recall remains relevance-limited,
+not a completeness claim. Estimates use UTF-8 text bytes / 4 rounded up and are
+explicitly approximate; the serialized reply estimate includes all metadata.
+
+**Enumeration.** `search` returns optional opaque continuation cursors that
+retain query, dates, who/alias expansion, kind, ordering and index revision.
+100 query hits and 500 browse hits are maximum page sizes, not total limits.
+Following continuations visits the entire evidence set once at a stable revision.
+Headers paginate `by_month`, `covered` and `chunks` as well as hits; explicit
+continuations identify unfinished lists, including pages with no hits. An
+approximately 8,000-token budget covers the entire serialized reply, including
+metadata, cursors and `reply_tokens`; pages may contain fewer than the hit cap.
+Oversized metadata fields must themselves be bounded/paged without losing a
+ref or making a required continuation inaccessible.
+
+**Reader assignments.** `chunk_tokens` defaults to 80,000 and is independent
+of the caller's capacity. The server partitions evidence records once in date/ref
+order (unknown last), excluding only coverage-eligible source records. Oversized
+days split into executable assignments, each carrying a `search` cursor, original
+scope, record count and estimated full-read cost, not first/last bounding refs.
+An oversized record may span bounded read segments across assignments; their
+completion must be combined before that record is considered read. Neither
+repeated undated records nor overlapping partial dates may be counted or assigned
+twice within a plan. Hits and evidence totals remain whole. Ordinary enumeration
+always permits rereading covered sources without deleting digests.
+
+**Read.** `read(ref, cursor?)` returns verbatim text for any source, note,
+manuscript file or heading section, with an optional opaque continuation.
+The same whole-reply budget applies, including retired-anchor text and metadata.
+Split at paragraph boundaries when possible, otherwise at Unicode character
+boundaries within a paragraph. Fragments preserve every character, punctuation,
+capital and whitespace; concatenating payloads and their preserved separators
+exactly reconstructs the selected stored text. Transport labels are separate
+from text payloads. Cursors retain the selection, document order and offset;
+source anchors remain citations, cursors never are.
+
+**Revisions.** Every cursor identifies an index revision. Any change to that
+revision, including note edits or a cache rebuild, explicitly invalidates it;
+never silently resume against changed ordering. Restart the original scope and
+deduplicate by record ref; changed records must be reread, and partial text from
+different revisions must never be concatenated. An interrupted or invalidated
+assignment cannot claim complete coverage. When saving a batch of notes
+invalidates pending cursors, obtain a fresh plan and reconcile completed source
+readings by record at the unchanged corpus revision; do not reread finished
+unchanged records merely because note persistence changed the index revision.
+
+A separate, durable server-issued `corpus_revision` advances when source content,
+membership (including deletion), conversion or dating changes. Note/manuscript
+edits do not advance it. Start with conservative corpus-wide invalidation.
+A cache-only rebuild preserves it when the source state is unchanged. Only
+`notes/digest/` notes with valid `window`, `coverage_complete: true` and the
+current `corpus_revision`, produced by complete source-wide window readings,
+receive coverage credit. A source-wide reading has no query or who restriction,
+uses kind source, includes unknown/overlapping dates and exhausts all pages.
+Filtered, partial, legacy and stale digests remain searchable but suppress no
+assignments. Completion of only one split assignment never certifies a window.
+Coverage may suppress a record only if that reading included it; overlapping
+windows alone do not establish inclusion for coarse/unknown dates. The server
+must evaluate membership conservatively. `covered` reports eligible digests;
+ordinary note search retrieves stale ones.
 
 Derived state (`.strata/cache/index.db`) is disposable. Nothing in it is
 preserved across a rebuild, and nothing expensive enough to regret losing is
@@ -219,9 +304,13 @@ which paragraph - is history rather than derivation, so it lives in
 
 ### Two tools
 
-- `search(query, from, to, who, kind)` - every filter optional. An empty
+- `search(query, from, to, who, kind, cursor?)` - every filter optional. An empty
   query with a date range is a timeline browse.
-- `read(ref)`.
+- `read(ref, cursor?)`.
+
+A cursor resumes its server-issued scope without new arguments; conflicting
+arguments are rejected. Assignment cursors are accepted by `search`; read
+continuations by `read`. Neither adds a third tool.
 
 There are no write tools. The agent writes notes and manuscript with its own
 Write/Edit tools; the index notices on the next call. Git is the write path.
@@ -236,8 +325,9 @@ Where summarization runs:
 
 - Small result sets: the session reads and summarizes.
 - Large result sets: a reader agent returns a digest (fan-out, below).
-- Every hit carries a title, the extractive gist, so a scan of hundreds of
-  hits costs a few thousand tokens.
+- Every hit carries an extractive title for scanning. The serialized reply
+  budget determines how many hits fit on a page; no fixed cost for hundreds
+  of arbitrary titles is assumed.
 
 Gists are extractive only: subject line, first sentence, heading, computed
 at index time for free. Model-written gists are deferred (see "after a real
@@ -257,10 +347,12 @@ that began before the window are carried by the people and event notes,
 which the scan surfaces and the agent reads instead of re-searching the
 past.
 
-Each chapter write appends one paragraph to the project note: dates covered,
-people active, threads opened or closed, themes touched. The project note is
-the most important file in the system; updating it is part of writing a
-chapter, not cleanup.
+Each chapter write updates the bounded current overview in `notes/project.md`:
+dates covered, people active, threads opened or closed, themes touched, and
+links to supporting notes and manuscript locations. Keep it at most 2,000 words,
+moving older entries to searchable `notes/history/` notes before exceeding that
+limit. Preserve links, citations, corrections and unfinished work. Ordinary note
+loading uses `read` continuations and the current session budget.
 
 ### Notes frontmatter
 
@@ -271,13 +363,18 @@ A small, named interface, owned by the notes adapter, not a convention:
     window    from, to; optional on any note; the header's coverage check
               reads it from `notes/digest/` only
 
-Two optional fields, validated in one place. The skill teaches the agent to
+    corpus_revision  server-issued revision for eligible digests
+    coverage_complete  true only after complete source-wide window reading
+
+Four optional fields, validated in one place. Invalid or missing coverage
+metadata grants no coverage credit. The skill teaches the agent to
 write them; the adapter is the only code that parses them.
 
 The note's **type is its folder**: `notes/<type>/<slug>.md`, singular. Two
 names are reserved because code depends on them: `notes/project.md`, the one
 project note the skill reads first (created by `init`), and `notes/digest/`,
-whose files are named by window (`2001-06-01--2001-06-30.md`). The skill
+whose files are named by window (`2001-06-01--2001-06-30.md`), with unique
+suffixes for repeated scopes and descriptive names for open/undated scopes. The skill
 teaches `person`, `event` and `theme` as a starting vocabulary and the agent
 may coin others (`place`, `company`, `deal`). Nothing filters by type; search
 surfaces every note by text and aliases alike.
@@ -293,27 +390,41 @@ note exists, `who` is a plain match on the string given.
 ### Fan-out: one cheap reader agent, one protocol
 
 An agent definition (the **reader**) with Haiku as its default model and a
-narrow job: given a scope or a list of refs, call search and read and return
+narrow job: given an executable assignment cursor, call search and read and return
 a digest in a fixed shape. It never writes prose or touches the manuscript.
 The skill overrides to Sonnet for reading that needs nuance (thematic
 passes). Fan-out work never runs on the main session's model.
 
-Digest shape, fixed so eight of them merge mechanically: what happened as
+Digest shape, fixed for bounded reduction: what happened as
 dated bullets with refs; who appears, one line per person; open threads and
 changes of state; a short section of verbatim quotes worth having for
 writing. Hard length cap.
 
 Protocol, in the skill:
 
-1. Search the scope. The header reports what is already digested; skip it.
-2. If the header's estimated size fits the in-session budget, read directly
-   and stop.
-3. Otherwise take the header's suggested chunks.
-4. Tell the user how many readers are about to run and why, then spawn them
-   in parallel with a concurrency cap.
-5. Save each digest as a note of type `digest` with its window and refs.
-6. Synthesize or write from the digests, reading verbatim only where the
-   writing needs actual wording.
+1. Search the scope, follow header continuations, and evaluate eligible digests
+   against the question. Reuse supported findings, preserving omissions.
+2. Read directly only when evidence cost fits remaining capacity after reserves;
+   otherwise take executable reader assignments with original filters intact.
+3. Run at most four readers concurrently. Follow all server continuations;
+   interrupted/invalidated work remains explicitly incomplete.
+4. Persist every returned digest and batch recovery state before starting another
+   batch. Readers write nothing; the caller saves their reports, including gaps.
+5. Reduce groups of at most four saved digests into cited summaries of at most
+   1,200 words. Persist each reduction; recursively reduce groups of at most four
+   when needed. Every level preserves child links, source citations, omissions,
+   contradictions and incomplete-reading status. Reduction alone earns no coverage.
+6. Synthesize from a bounded set of saved summaries, reading sources for exact
+   wording and omitted detail. A completed aggregate may claim window coverage
+   only after all original source-wide assignments finish at the current revision.
+
+Use host-reported capacity when available, with a conservative 200k-token fallback;
+do not assume a 1M session. Reserve capacity for existing conversation, output,
+synthesis and host overhead. Track all incoming replies and reader reports, and
+persist a recovery note before pressure requires compaction. If the host requires
+the user to compact, explain that host limitation plainly. Fresh sessions load
+the bounded project overview and linked recovery state, then targeted notes;
+they must recover supported findings without rereading the entire archive.
 
 Where the tuning numbers live: chunk budget in `.strata/config.yaml` (the
 server computes chunks); in-session budget and concurrency cap as named
@@ -380,6 +491,15 @@ durable, so a citation written today resolves to the same text in ten years.
   lexical search plus aliases proves insufficient for entity questions.
 - Cross-project queries or shared notes.
 - Anything else.
+
+## Acceptance before support claims
+
+`docs/acceptance.md` is the cross-module memory and user-journey gate. The
+revised contracts are settled implementation requirements; they are not test
+results. Archive reconnaissance (#20) is required before claiming support for
+the actual user's manuscript/source formats, including multi-entry files,
+exports and images if present. Enron and invented fixtures do not prove that
+support. Continue independently settled planning while the report is pending.
 
 ## Build order
 

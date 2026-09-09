@@ -2,9 +2,9 @@
 
 Decided 2026-09-08, resolving wayfinder ticket #6.
 
-## Context
+## Historical context (original design, before the amendments below)
 
-Design.md promises that a source record is frozen the first time it is indexed:
+The original design promised that a source record is frozen the first time it is indexed:
 "if the raw file changes or a converter is bumped, reconversion produces a new
 version with a drift report; old refs keep resolving to the frozen text they
 cited. Memoria's positional anchors that shift silently on edit are the failure
@@ -34,18 +34,20 @@ citation in every note: memoria's exact failure, arriving by a new route.
 ## Decision
 
 **Anchors are ids, not positions.** On reconversion, new paragraphs are aligned to
-existing numbers by match key. Matched paragraphs keep their number; vanished ones
+existing numbers by exact stored paragraph text. Matched paragraphs keep their number; vanished ones
 are retired and never reused; genuinely new ones get fresh numbers appended.
 Paragraph numbers therefore stop being contiguous, and stop being positional -
 `p17` may be the 12th paragraph in document order. That is the guarantee, not a
 defect.
 
-**The match key is normalized; stored text is verbatim.** The key is NFKC,
-casefolded, quotes and dashes straightened, whitespace collapsed, trimmed. Stored
-text is the converter's bytes. Without this split, a converter bump that only
-collapses a double space retires every anchor in the corpus - the mechanism firing
-hardest exactly when the change is least meaningful. Equal keys pair in document
-order, so a record with two identical paragraphs stays deterministic.
+**Only exactly equal stored text keeps an anchor.** Punctuation, capitalization,
+Unicode representation and whitespace are part of the citation. Do not normalize
+for anchor matching; a hash may accelerate lookup but equality must be checked.
+Every cosmetic or substantive text change retires the old anchor and allocates
+a new one. Identical duplicates pair first unmatched old to first unmatched new
+in document order. Converter corrections remain possible; they issue new anchors.
+This supersedes the normalized-key resolution on #6; its discussion remains on
+GitHub as history, not the current contract.
 
 **Durable identity lives apart from derived state, and the directory says which is
 which.**
@@ -55,7 +57,8 @@ which.**
       ledger.db          durable, NEVER dropped
                            units(id, path, sha256, deleted)
                            versions(id, n, converter, at)
-                           anchors(id, p, key_hash, added_v, retired_v)
+                           anchors(id, p, exact_text_hash, added_v, retired_v)
+                           active_text(anchor_id, text)
                            retired_text(anchor_id, text)
       cache/
         index.db         disposable, gitignored
@@ -74,7 +77,12 @@ foot-gun. Deleting the wrong one breaks every citation in the project silently.
 - A citation written today resolves to the same text in ten years, or says it was
   retired. It never resolves to a different paragraph.
 - Paragraph numbers are sparse and non-positional. `read` returns document order
-  and shows numbers; the gaps are agent-visible only.
+  and shows numbers; the gaps are agent-visible only. Inclusive ranges traverse
+  between live endpoint anchors in document order, never numeric intervals.
+  Reversed endpoints error; retired/missing endpoints produce a diagnostic,
+  never a guessed range. Single retired anchors still return their exact text.
+- Capped reads use opaque revision-bound continuations, including within an
+  oversized paragraph. Cursors are temporary navigation handles, never citations.
 - `.strata/ledger.db` must be backed up and committed. It is the only
   irreplaceable per-project state besides `notes/`.
 - The alignment pass and the key function are the entire complexity investment
@@ -86,12 +94,27 @@ foot-gun. Deleting the wrong one breaks every citation in the project silently.
 
 Rebuild reconverts from the raw file, so once a file has changed, a vanished
 paragraph's bytes cannot be regenerated from anything. The ledger therefore
-holds `retired_text(anchor_id, text)`, written at retirement time for the
-paragraphs that vanish and never for matched ones. Superseded versions are not
+holds exact current paragraph text durably as well as
+`retired_text(anchor_id, text)`, written at retirement time for paragraphs that
+change or vanish. Durable current text is necessary to retire a citation even
+when raw sources change or disappear after the disposable cache was deleted.
+Retirement and version/anchor updates are atomic; a crash cannot discard cited
+text. Exact matched text need not be duplicated into retired storage. Superseded versions are not
 stored as such; retired paragraphs are the citations' collateral, and they are
 never pruned. Reconversion is silent (no threshold, no confirmation), and there
 is no drift report artifact: drift is ledger state, surfaced by `read` on a
 retired anchor and by one CLI stdout line per changed record.
+
+## Superseding amendment 2026-09-08: exact citations (#6, #15)
+
+The decision text above replaces normalized matching. Any text change, however
+cosmetic, retires the old anchor; no historical citation silently gains new
+wording. Deletion retires all remaining anchors and preserves their text.
+Cache rebuilds replay durable identity and text, never infer old identity from
+changed raw files. Source changes also advance the durable corpus revision;
+cache-only rebuilds invalidate navigation cursors but preserve corpus revision
+when source state is unchanged. Required regression scenarios are in
+`../acceptance.md`; none are claimed executed in this documentation revision.
 
 ## This partially reverses memoria ADR-0006
 
@@ -114,7 +137,8 @@ Two parts do not survive:
    not corruption, and the density rule's only "fix" for one is renumbering,
    which breaks every stored citation.
 2. **The ledger is SQLite, not committed YAML.** It now carries per-paragraph rows
-   (roughly 40 bytes each; a 100k-file corpus averaging 40 paragraphs is about 4M
-   rows, ~160MB), which YAML cannot hold usefully. `load_manifest`,
+   plus exact current and retired text. Storage depends on corpus size and edit
+   history; the former ~40-byte identity-row estimate excludes this text and
+   cannot estimate total ledger size. YAML cannot hold this usefully. `load_manifest`,
    `save_manifest` and `load_converter_pins` do not port; `id_number`,
    `format_id` and every allocation rule do.

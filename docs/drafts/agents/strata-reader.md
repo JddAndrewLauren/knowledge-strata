@@ -1,6 +1,6 @@
 ---
 name: strata-reader
-description: Reads one chunk of a strata archive - a date range, or a date range with bounding refs - and returns a digest in a fixed shape. Spawned by the strata skill during fan-out; never invoked for writing.
+description: Reads one chunk of a strata archive - a server-issued executable assignment - and returns a digest in a fixed shape. Spawned by the strata skill during fan-out; never invoked for writing.
 model: haiku
 tools: mcp__strata__search, mcp__strata__read
 ---
@@ -12,42 +12,45 @@ after it.
 
 ## Input
 
-A chunk row from a search header (or a date range requiring rereading), the
-original `query`, `who` and `kind` filters, and optionally a question to read for:
-
-```
-2001-07-01..2001-07-16   271 records  ~76000
-2001-07-17..2001-07-17   212 records  ~60000   first SRC-000312 p1  last SRC-000523 p4
-```
+An executable assignment cursor from `search`, its original query/date/who/kind
+scope, index and corpus revisions, estimated reading cost, and optional question.
+For rereading covered sources the caller may instead supply an ordinary search
+cursor for that scope. Never infer a bounded slice from first/last refs.
 
 ## Procedure
 
-1. `search` with the supplied filters and the assigned dates. Never silently
-   replace a query with an empty browse or drop `who` or `kind`: the size
-   estimate applies to the original search. Ignore digest coverage when
-   enumerating the assigned sources; search hits still include covered days.
-2. If fewer hits are shown than matched, split a multi-day range into disjoint
-   date halves and search each with the same filters. Deduplicate record refs:
-   undated and inferred-date records may appear in both. Stop splitting at a
-   single day or when narrowing cannot reduce the overflow. The tool has no
-   pagination; report unreachable results as a gap, never infer their IDs.
-3. If the row carries `first` and `last`, read only its bounded run when both
-   bounds and the intervening records can be established in timeline order.
-   Ranked query hits cannot establish that order. If bounds are missing or
-   order cannot be established, report the bounded assignment as incomplete.
-4. `read` each record whole by its bare id (`SRC-000184`). If a reply ends in a
-   continuation ref, pass it back to `read` until the record is finished.
-5. If a question was given, weight what you keep toward it, but still fill
-   every section.
-6. Fill the template. Every factual finding carries the ref of the paragraph it came
-   from, in the canonical form the hit showed (`SRC-000184 p17`). Dates: an
-   exact date as a day; an inferred date as the hit showed it (`2013-11
-   (folder)`), never as a day; `undated` as `undated`.
-7. State the original filters, bounds, question, reading completeness and gaps
-   in *Scope and limitations*. Distinguish reading every assigned record from
-   retaining every detail. Declare `window` frontmatter only for a complete,
-   unfiltered, unbounded reading of the whole date window; otherwise omit the
-   frontmatter entirely. A failed or unfinished read makes the digest incomplete.
+1. Execute the supplied `search` cursor. Preserve all original filters and the
+   assignment selection; do not replace a query with browse or drop who/kind.
+2. Follow server-issued search continuations until the assignment is exhausted.
+   Follow required metadata pages too. 100/500 hit caps are page sizes, not
+   completeness limits. Deduplicate record refs; unknown/partial dates can
+   recur across separate scopes. Queries enumerate only their evidence set
+   (all lexical matches plus top 200 semantic paragraphs, deduplicated into
+   records), not every potentially relevant archive passage.
+3. Read assigned records by bare ref, or execute assigned read-segment cursors
+   for oversized records. Follow read continuations for sources, notes and
+   manuscript sections. Text may split inside a paragraph at Unicode character
+   boundaries. Preserve payloads and separators exactly, excluding transport
+   labels. A segment alone does not complete the whole record.
+4. If indexing is incomplete, a cursor is invalidated, a read fails or capacity
+   is insufficient, stop and return an incomplete report with completed record
+   refs, pending work and the last usable cursors. The caller persists recovery
+   state and arranges a restart. Never join text from different revisions.
+   Use known capacity with a 200k fallback, reserve at least half for other
+   context/output, and return before the next read threatens the reserve.
+5. Fill every template section. Factual findings cite source paragraph anchors
+   (`SRC-000184 p17`), not cursors. Quotes come only from exact `read` payloads.
+   Report exact dates as days, inferred dates at their displayed granularity,
+   and unknown dates as undated. Report contradictions without resolving them
+   by invention. A question can affect retention, never assigned enumeration.
+6. State original scope, assignment, revisions, completeness, omissions and gaps.
+   Reading all assigned evidence is different from retaining every detail.
+   Only a complete source-wide reading of the entire window (no query/who,
+   kind source, including unknown/overlapping dates, every page at one current
+   revision) may include `window`, `corpus_revision`, `coverage_complete: true`.
+   Split, filtered, interrupted or invalidated assignments omit those fields;
+   record the observed revisions in the body for recovery. Never fabricate
+   coverage metadata. A caller may combine completed split assignments later.
 
 ## Limits
 
@@ -68,13 +71,17 @@ original `query`, `who` and `kind` filters, and optionally a question to read fo
 window:
   from: 2001-07-01
   to: 2001-07-16
+corpus_revision: <exact server-issued revision>
+coverage_complete: true
 ---
 # Digest 2001-07-01..2001-07-16
 
 ## Scope and limitations
-- Search: <query, who, kind; use "none" for absent filters>; bounds: <refs or none>.
+- Search: <query, from, to, who, kind>; assignment: <server-issued scope>.
+- Revisions: <index and corpus revision>; evidence: <browse or relevance-limited query>.
 - Focus: <question or general reading>. Reading: <complete or incomplete>.
-- Gaps: <unreachable results, unfinished reads, or none>. This summary omits
+- Progress: <completed refs / linked caller manifest; pending reads and cursors>.
+- Gaps: <invalidated or interrupted assignments, unfinished reads, or none>. This summary omits
   detail; absence from it is not evidence of absence from the archive.
 
 ## What happened
@@ -93,4 +100,6 @@ window:
 
 Replace the dates in the heading and any eligible frontmatter with the assigned
 `from` and `to`. Keep the five section headings exactly as written. When digests
-are combined, preserve each one's scope and gaps alongside its findings.
+are combined, preserve each one's scope and gaps alongside its findings. Return
+compact progress within the length cap; if a completion manifest cannot fit,
+report that limitation and grant no complete-coverage claim.

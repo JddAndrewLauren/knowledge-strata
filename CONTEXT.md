@@ -25,7 +25,9 @@ produces version n+1; refs do not carry a version, and resolve against the newes
 kind.
 
 **Durable ref** - resolves to the same text indefinitely, or says it was retired.
-Source refs and bare file paths. A vocabulary term, not a predicate in code.
+Source paragraph anchors carry the exact-text guarantee. Bare record refs and
+file paths name live artifacts and do not freeze their wording. A vocabulary
+term, not a predicate in code.
 
 **Positional ref** - points inside a live artifact and can rot or silently
 retarget. A manuscript ref carrying a heading. Never stored in a note as if
@@ -34,25 +36,33 @@ durable.
 **Anchor** - a paragraph's durable number within a record, written `p17`. An id,
 not a position: `p17` may be the 12th paragraph in document order.
 
-**Retired anchor** - a number whose paragraph vanished at some version. Never
+**Retired anchor** - a number whose paragraph changed or vanished at some version. Never
 reused, and `read` says so rather than resolving it to a neighbour: a marker line
 naming the version it retired at, the verbatim text it cited, and a pointer to
 the bare record ref. Never a suggested replacement.
 
 **Retired text** - the verbatim paragraph behind a retired anchor, copied into the
-ledger at the moment it vanishes and never pruned. The only text the ledger
-holds; matched paragraphs live in the current version.
+ledger at the moment it changes or vanishes and never pruned. Current exact
+paragraph text is also durable, so retirement remains possible
+after cache deletion and raw-file changes or removal.
 
 **Drift** - what a reconversion changed: anchors kept, retired and added. Ledger
 state, not a report. Surfaced lazily by `read` on a retired anchor; the CLI
 prints one line per changed record. Reconversion never asks for confirmation.
 
-**Match key** - the normalized form of a paragraph used only for aligning a
-reconversion to existing anchors: NFKC, casefolded, quotes and dashes
-straightened, whitespace collapsed, trimmed. Never what gets stored.
+**Match key** - exact stored paragraph text, without normalization. Hashes may
+accelerate lookup but equality decides. Cosmetic edits retire anchors too;
+identical duplicates pair in document order.
 
-**Continuation ref** - the open-ended tail form, `SRC-000184 p31-`, that a capped
-`read` hands back so the agent never computes an end number.
+**Continuation cursor** - an opaque temporary navigation handle for `search`
+or `read`, retaining selection, filters, ordering/offset and index revision.
+An assignment cursor executes a bounded reader slice. Cursors are not citations;
+revision changes invalidate them explicitly. Restart and deduplicate records,
+rereading changed ones rather than mixing text pages from different revisions.
+
+**Range** - inclusive traversal between live anchors in document order, never
+numeric anchor order. Retired/missing endpoints yield a diagnostic; a reversed
+range errors. Single retired anchors remain readable.
 
 ## Records
 
@@ -85,11 +95,14 @@ are the starting set. Two names are reserved because code depends on them:
 `project.md` and `digest/`.
 
 **Project note** - `notes/project.md`, the one note the skill reads first.
-Each chapter write appends a paragraph to it. Created by init, never renamed.
+A current overview of at most 2,000 words, updated after chapter writes. Older
+entries move to searchable history notes with links and citations preserved.
+Created by init, never renamed; loaded through bounded `read` pages.
 
 **Digest** - a note under `notes/digest/`, named by its window, written by a
-reader for one fan-out chunk. The only note type whose window the header
-treats as coverage.
+reader for an assignment, or saved by the caller as a completed window aggregate.
+Only a complete source-wide window digest at the current corpus revision can
+earn coverage credit; a split assignment's digest alone cannot.
 
 **Window** - a note's declared coverage, `from` and `to`. Optional on any note;
 the search header's coverage check reads it from digests only.
@@ -101,41 +114,63 @@ filter expands through the aliases of every note, whatever its type.
 ## Storage
 
 **Ledger** (`.strata/ledger.db`) - durable, never dropped. Ids, versions,
-anchor identity and retired text. The only irreplaceable per-project state
-besides `notes/`.
+anchor identity, exact current and retired text, and corpus revision. The only
+irreplaceable per-project state besides `notes/`.
 
 **Index** (`.strata/cache/index.db`) - derived and disposable. Rebuild is
 `rm -rf .strata/cache/`, then sync replays the ledger.
 
-**Header** - what search returns before hits: totals, estimated tokens, counts by
-month, undated and inferred counts, digests already covering the window,
-suggested chunks, how many hits are shown, and the reply's own size. What makes
-fan-out decisions cheap and deterministic; the skill reads it and never counts
-or partitions in prose. Totals count what matched the words and filters, never
-what is semantically near.
+**Header** - bounded search metadata: lexical and evidence counts, estimated
+full-record reading cost, month counts, unknown/inferred counts, eligible digest
+coverage, executable assignments, shown hits and reply size. Lists paginate
+within the same approximately 8,000-token whole-reply limit as hits.
 
-**Hit** - one matched record, shown as ref, date, kind and title, with a
-snippet when there was a query. One hit per record, never per paragraph; its
-ref is the anchor of the best-matching paragraph.
+**Evidence set** - for queries, all lexical matching paragraphs plus the top 200
+semantic paragraphs under the same filters, deduplicated into records. Counts
+labeled lexical remain lexical; reading estimates and assignments use the union.
+Semantic retrieval is relevance-limited; browse enumerates the whole archive.
 
-**Chunk** - a contiguous run of days the header suggests one reader take,
-sized to the chunk budget. Days a digest already covers are left out. A day
-too big for one chunk is split, and those chunks name their first and last
-ref.
+**Hit** - one evidence record: ref, date, kind, title and query snippet. Source
+hits cite their best-matching paragraph. 100 query / 500 browse hits are maximum
+page sizes, never total limits.
 
-**Chunk budget** - the server-side size of one chunk, in estimated tokens,
-sized for the reader. Independent of the in-session budget, which the skill
-owns and which sizes the session's own model.
+**Chunk** - a server-issued executable reader assignment over evidence records
+(or read segments of an oversized record), with cursor, scope and estimated cost.
+Assignments partition the plan without duplicating undated/partial-date records;
+only eligible source coverage suppresses assignments. No bounding-ref guesswork.
 
-**Coverage** - a digest's window overlapping the searched range. Reported so
-the skill can skip what is already digested; applied only to chunk
-suggestion, never subtracted from the totals.
+**Chunk budget** - estimated read tokens per assignment, server default 80,000,
+optionally configured by `chunk_tokens`; independent of session capacity.
+
+**Index revision** - snapshot identity carried by cursors; changes explicitly
+invalidate navigation, including note edits and cache rebuilds.
+
+**Corpus revision** - durable server-issued source-state identity; advances for
+source content, membership, conversion or dating changes, not note/manuscript
+edits or unchanged cache-only rebuilds. Conservative corpus-wide invalidation.
+
+**Coverage** - credit only for `notes/digest/` with valid `window`,
+`coverage_complete: true` and current `corpus_revision`, after complete
+source-wide reading (no query/who, kind source, all pages and unknown/overlapping
+dates included). Legacy, stale, filtered and incomplete digests remain searchable
+but suppress nothing. Applied only to assignments, never evidence totals or hits;
+overlap alone does not prove inclusion of unknown or coarse-dated records.
+
+**Reduction** - a saved cited summary of at most four saved digests/summaries,
+at most 1,200 words. Recurses in groups of at most four, retaining child links,
+source citations, omissions, contradictions and incomplete status at every level.
+Reduction alone cannot confer coverage.
+
+**Recovery note** - durable task progress, saved after every reader batch before
+another starts and before context pressure. Includes completed/pending assignments,
+filters, revisions, saved digest/reduction links and gaps. Fresh sessions start
+from the bounded project overview and follow these links.
 
 **Reply size** - the estimated tokens of a search or read reply, stated at
 its end so the skill can tell when a session should compact.
 
-**Drift report** - what a reconversion tells the user changed. Contents not yet
-decided.
+**Drift report** - no separate artifact. Read shows retirement and exact text;
+the CLI prints one line per changed record.
 
 ## Stand-ins
 
@@ -161,7 +196,8 @@ shows zero skips: a skipped test is a failed one.
 
 **Enron tier** - the one end-to-end test that is not hermetic, marked `e2e` and
 deselected by default. Runs on the author's machine against the real corpus
-with the real embedder, and is the only place scale is proven. Build issues call
+with the real embedder, and demonstrates real-model scale. It cannot establish support for the actual
+user's formats or the full user journey; those require the acceptance gate. Build issues call
 what it covers *demonstrated*; what the hermetic tiers cover is *verified*.
 
 ## Project folder

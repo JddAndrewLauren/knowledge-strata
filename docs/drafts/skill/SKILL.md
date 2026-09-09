@@ -7,68 +7,86 @@ description: Work with this project's archive, notes and manuscript through the 
 
 This folder is a strata project: `notes/`, optionally a manuscript, and two MCP
 tools over an archive too large to read. The user sees none of the machinery.
-Never mention indexes, tokens, chunks, sessions or modes; the two exceptions
-are marked below.
+Keep internal machinery invisible during ordinary work. Explain progress, missing
+evidence, recovery and any host-required user action plainly when necessary.
 
 ## Settings
 
-Sized for a 1M-token session. Adjust after the first real corpus.
+Use known host capacity; otherwise assume 200,000 tokens. These are conservative
+initial settings to validate, not measured host guarantees.
 
 | setting | value | meaning |
 |---|---|---|
-| `direct_read_max` | 100000 | largest `tokens` figure in a search header you read directly rather than fanning out |
-| `reader_concurrency` | 4 | readers running at once during a fan-out |
-| `compact_at` | 850000 | approximate reading budget since the last compaction or fresh session |
+| `capacity_fallback` | 200000 | context capacity when the host gives no usable figure |
+| `reserve` | at least 50% of capacity | space for conversation, output, synthesis and host overhead; subtract already occupied context too |
+| `direct_read_max` | min(50000, remaining unreserved capacity) | maximum estimated evidence text to read directly |
+| `reader_concurrency` | 4 | maximum readers running at once |
+| `reduction_fan_in` | 4 | maximum saved child digests/summaries loaded per reduction |
+| `summary_max_words` | 1200 | cap per persisted reduction |
+| `project_max_words` | 2000 | cap for the current project overview |
+
+Apply the capacity calculation separately to each reader. If its assignment
+cannot fit, persist incomplete progress and request smaller server assignments;
+do not assume a larger model window. Persist before the next batch or operation
+would consume the reserve, and sooner on any host context warning.
 
 ## The two tools
 
-- `search(query, from, to, who, kind)` - every argument optional. An empty
-  query with a date range is a timeline browse. Reply: a **header**, a blank
-  line, then hits.
-- `read(ref)` - a paragraph (`SRC-000184 p17`), a run (`p17-22`) or a whole
-  record (`SRC-000184`, `notes/person/dave-fuller.md`, `manuscript/ch03.md`).
-  Verbatim, capped, ending in a continuation ref (`SRC-000184 p31-`) when cut;
-  pass that ref back as is.
+- `search(query, from, to, who, kind, cursor?)` - all optional; an empty
+  query browses the archive. A cursor alone resumes the exact server-issued
+  scope; conflicting arguments are rejected.
+- `read(ref, cursor?)` - a paragraph, document-order range, whole source,
+  note, manuscript file or heading section. A read cursor alone resumes the
+  same selection and offset. Both tools cap their entire serialized reply,
+  including metadata, at approximately 8,000 tokens.
 
-Act on the header; never count, estimate or partition in prose.
+Act on server estimates and assignments; never invent partitions or refs.
 
+```text
+indexing        complete
+index_revision  <opaque index revision>
+corpus_revision <opaque source revision>
+lexical_total   0 records, 0 paragraphs
+evidence_total  12 records, 18 paragraphs
+tokens          ~90000
+by_month        <bounded rows; continuation if unfinished>
+undated         3
+inferred        0
+covered         <eligible digest rows; continuation if unfinished>
+chunks          <scope, record count, ~cost, executable assignment cursor>
+shown           12 of 12 evidence records
+continuations   <opaque cursors for unfinished lists/hits, or none>
+reply_tokens    ~5400
 ```
-total      1140 records, 3877 paragraphs
-tokens     ~310000
-by_month   2001-06  612 records  ~168000
-           2001-07  528 records  ~142000
-undated    3
-inferred   0
-covered    notes/digest/2001-06-01--2001-06-30.md  2001-06-01..2001-06-30
-chunks     2001-07-01..2001-07-16   271 records  ~76000
-           2001-07-17..2001-07-31   257 records  ~66000
-shown      100 of 1140
-reply_tokens ~5400
-```
 
-- `tokens`: the cost of reading every match in full. Compare with
-  `direct_read_max`.
-- `covered`: existing summaries, not proof that the question is answered.
-  Their days are already left out of `chunks`, but not search hits or totals.
-  Read each relevant digest's scope and limitations. Reuse supported facts;
-  search and read sources for omitted detail, changed sources or a new question.
-  For excluded days that need rereading, search those dates with the original
-  filters and follow the reader's enumeration procedure; do not rely on
-  `chunks` to restore them or remove existing digests to force a new plan.
-- `chunks`: present only when the scope is too big for one reader. Rows are
-  `from..to  records  ~tokens`, plus `first..last` bounding refs when a single
-  day was split.
-- `undated`, `inferred`: how soft the window's dates are. Dates are a hint,
-  not a gate; undated records stay in.
-- `shown`: fewer shown than total means incomplete retrieval, not proof that
-  omitted hits are irrelevant. Narrow dates for enumeration; an overflowing
-  single day may be unreachable with these tools (see *Fan-out*).
-- `reply_tokens`: ends every reply. Sum replies entering this session across
-  tasks; do not include readers' private tool replies. See *Reading budget*.
+- For queries, evidence is all lexical matches plus the top 200 semantic
+  paragraphs under identical filters, deduplicated into records. `tokens`
+  estimates full evidence records, including semantic-only results. Lexical
+  counts describe only lexical matches. Semantic results are relevance-limited;
+  only browse supports a claim to have enumerated the whole archive.
+- 100 query hits and 500 browse hits are maximum page sizes. Follow all relevant
+  continuations, including month, coverage and assignment lists; empty hit pages
+  do not imply enumeration is done. No narrowing dates to work around caps.
+- `covered` grants credit only to complete source-wide digests at the current
+  corpus revision. Read limitations before reuse. Search remains able to
+  enumerate covered sources when a question needs omitted detail.
+- `chunks` contain executable assignment cursors, including split days or
+  oversized records. Pass them intact with their recorded filters and scope.
+- Unknown dates remain included; partial dates filter by period overlap.
+  Deduplicate record refs across restarted or overlapping plans. Reread changed
+  records. An invalidated cursor requires restarting its original scope;
+  never combine text fragments from different revisions.
+- `read` fragments preserve exact text, even inside an oversized paragraph.
+  Follow read continuations to completion when the task needs the whole
+  selection. Concatenate payloads with their preserved separators, without
+  transport labels or added/trimmed whitespace. Cursors are never citations.
+- If `indexing` is incomplete, tell the user preparation is still underway.
+  Partial results cannot establish completeness or digest coverage.
+- Account for `reply_tokens`, returned reader digests, generated summaries and
+  conversation. Reply sums alone do not measure actual context occupancy.
 
-A hit is one record: ref, date, kind, title, `(n matches)`, and on query
-searches one snippet line. Its ref is the best paragraph's anchor: `read` it for
-the paragraph, the bare id for the record. `p17` is an id, not a position.
+A source hit cites its best-matching paragraph; use its bare record id for the
+whole record. `p17` is an id, not a position. A note path names live text.
 
 ## Input
 
@@ -79,7 +97,8 @@ ambiguity or conflicting evidence requires it. A supplied ref can go straight
 to `read`. Retrieval alone requires no note update or manuscript reading.
 
 - **Notes.** For synthesis and writing, read `notes/project.md`;
-  it is the running memory of the project. Search `kind: note` for the people,
+  it is the bounded current overview. Follow linked recovery and history notes
+  relevant to the task through `read` continuations, within capacity. Search `kind: note` for the people,
   events and themes the request names. Notes and digests are starting points,
   not final authority: recheck their sources when evidence conflicts, sources
   changed or the question needs detail they omit.
@@ -113,7 +132,7 @@ text. Use the reading depth appropriate to the request above.
 - **Write with your own tools.** Write and Edit, into the manuscript or
   `notes/`; the server has no write tools and needs none. Quote sources only
   from `read` output.
-- **Record.** Every manuscript change appends one paragraph to
+- **Record.** Every manuscript change updates
   `notes/project.md`: dates covered, people active, threads opened or closed,
   themes touched, file and heading. Record new supported facts or corrections
   about a thing in its note (see *Notes*). Commit once at task end.
@@ -124,30 +143,40 @@ Readers are `strata-reader` subagents: they return a digest in a fixed shape
 and write nothing. Their enumeration procedure and digest template are in the
 companion [reader definition](../agents/strata-reader.md).
 
-1. Search the scope. Assess `covered` against the question, including each
-   digest's scope, omissions and any subsequent source changes.
-2. If `tokens` fits `direct_read_max`, read directly and stop.
-3. Otherwise take `chunks` as they stand, one reader per row, passing the row
-   verbatim (with `first..last` when present), plus the original `query`, `who`
-   and `kind` filters. For excluded days needing rereading, assign their date
-   range and the same filters for enumeration, without inventing chunk totals.
-4. **Tell the user** (first exception): one sentence, how many readers over
-   what span, and that the span is more than one sitting holds. Spawn them in
-   parallel, at most `reader_concurrency` at a time, each with the row and the
-   question if there is one. Pass `model: sonnet` when the pass needs nuance -
-   themes, tone, intent - otherwise the reader's default.
-5. Readers preserve filters and narrow dates when results are truncated.
-   These tools have no pagination or bounding-ref search arguments. If a
-   single day still overflows, bounds are unreachable, or reading cannot
-   finish, accept an explicitly incomplete report; never claim full coverage.
-   Explain the missing evidence plainly to the user. Do not repeatedly retry
-   the same scope or fabricate refs from numeric IDs.
-6. Save each digest verbatim as `notes/digest/<from>--<to>.md`; use the next
-   unused suffix (`-2`, `-3`, ...) for another over the same window. Only a
-   complete, unfiltered whole-window reading may declare `window` frontmatter.
-   Filtered, bounded and incomplete digests retain their scope in the body.
-7. Work from supported digest facts; `read` for wording, missing detail and
-   contradictions. A digest's silence never establishes that nothing happened.
+1. Search the scope and follow planning continuations. Assess eligible coverage
+   against the question; stale summaries may still contain supported findings
+   but cannot suppress new reading.
+2. Read directly only if evidence cost fits the remaining unreserved budget.
+   Otherwise pass each executable assignment cursor, its original query/date/
+   who/kind scope and question to a reader. Use ordinary search continuations
+   to reread covered spans; coverage never removes hits.
+3. Tell the user how many readers will cover what span and why. Run at most
+   `reader_concurrency` at once. Use the reader default model; override to
+   Sonnet when themes, tone or intent require nuance.
+4. Readers follow server continuations and preserve assignment scope. Persist
+   every digest verbatim, including incomplete reports, under
+   `notes/digest/<from>--<to>[-N].md` (use a unique descriptive scope for undated
+   or open-ended assignments). Save the batch before starting another.
+5. Update a linked recovery note with the task, original filters, index/corpus
+   revisions, completed and pending assignments, interrupted cursors, digest
+   paths and gaps. Cursors are hints for resumption; validate them before reuse.
+   If invalidated, restart that scope and reconcile record completion at the
+   new revision. Batch note writes also invalidate pending index cursors: get
+   a fresh plan, retaining verified completed source reads when corpus revision
+   is unchanged. Never promote interrupted work to complete coverage.
+6. Reduce at most four saved digests at a time to a cited summary of at most
+   1,200 words in `notes/summary/`. Save each reduction before processing the
+   next group. Recursively reduce at most four children until the final set
+   fits capacity. Every level preserves child links, source refs, omissions,
+   contradictions and incomplete-reading status. Keep the detailed gaps in
+   linked notes when lengthy; never hide their existence in the parent.
+7. A reader digest may declare coverage only for an entire source-wide window
+   completed at the current corpus revision. Split assignments omit coverage
+   fields. The caller may save an eligible aggregate digest only after verifying
+   all source-wide assignments, including unknown/overlapping dates and every
+   read page, completed at one current revision. Reduction itself proves nothing.
+8. Work from supported saved findings; use `read` for exact wording, missing
+   detail and conflicts. Silence in a digest is never evidence of absence.
 
 ## Notes
 
@@ -161,12 +190,16 @@ when none fits. Reserved: `notes/project.md` and `notes/digest/`.
   do not leave incompatible bullets as equally current. Nothing speculative.
 - **Slug.** The canonical name: the user's form if given, else the fullest
   form the sources use. Never renamed; the path is a ref.
-- **Frontmatter.** Two optional fields, nothing else. `aliases`: the name
-  forms actually seen (full name, first name, email address, initials), seeded
-  at creation, added to later. `window` (`from`, `to`): optional; on digests,
-  allowed only after complete, unfiltered whole-window reading. It records
-  what was read, not exhaustive retention or permanent freshness. Only digests
-  count as coverage. The user never edits frontmatter.
+- **Frontmatter.** `aliases` contains observed name forms. `window` (`from`,
+  `to`) is optional on any note. Eligible digests additionally carry the exact
+  server-issued `corpus_revision` and `coverage_complete: true`. Only complete
+  source-wide window readings at the current revision earn coverage. Filtered,
+  split, incomplete, legacy or stale digests earn none. Never invent a revision
+  or copy a new revision onto an old digest. The user never edits frontmatter.
+- **Project overview.** Keep `notes/project.md` within 2,000 words. Move older
+  entries to searchable `notes/history/` before exceeding the cap, retaining
+  citations, correction history and links. Keep current threads and a recovery
+  note link in the overview. Load ordinary notes through `read` pages too.
 - **Body.** Dated bullets with refs. Short and factual; a note is memory, not
   prose.
 
@@ -181,7 +214,9 @@ aliases: [Dave, D. Fuller, dave.fuller@example.com]
 
 ## Citing
 
-- **Sources**: `SRC-000184 p17`, or `p17-22` for a run. Durable.
+- **Sources**: `SRC-000184 p17`, for exact persistent wording. A `p17-22` run traverses
+  current document order between live endpoints, not numeric labels; cite
+  individual anchors when preserving exact quotations across future edits.
 - **Dates**: `exact` as a day. `inferred` at its own granularity - `2013-11
   (folder)`, `2013` - never as a day. `undated` stays undated.
 - **Manuscript**: file and heading, `manuscript/ch24.md # The Letter`, in the
@@ -193,21 +228,22 @@ aliases: [Dave, D. Fuller, dave.fuller@example.com]
 
 ## Reading budget
 
-Check after tool replies and between reader batches, not just at task end.
-The reply sum is an approximate reading budget, not actual context occupancy:
-it excludes other conversation and generated text. Use a host context warning
-or known remaining capacity to advise compacting earlier. Retain the sum across
-tasks; reset only after compaction actually occurs or a fresh session begins.
+Check after tool replies and between reader batches. Use the settings above
+against available capacity; a reply sum excludes conversation and generated
+text and is not a safe standalone trigger. Save reports, reductions and recovery
+state before pressure requires compaction, not after consuming the reserve.
 
-**Compaction** (second exception). When the sum passes `compact_at` or the host
-signals pressure, say once that the session has read a lot of the archive and
-give the exact line before taking on more reading:
+If the host cannot compact automatically and requires a user command, explain
+that host limitation once, then offer:
 
-```
-/compact Keep the project note, the digests written this session, every ref cited so far, and outstanding reading gaps.
+```text
+/compact Keep the project overview and recovery-note path, saved digest/summary links, current task, original filters and revisions, source citations, and incomplete reading gaps.
 ```
 
-Or suggest a fresh session if the task is finished.
+Do not claim compaction happened until it does. In a fresh session, read the
+bounded project overview and linked recovery note, then targeted saved summaries
+and notes. Recover supported prior findings without rereading the whole archive;
+check current corpus revision before accepting coverage or resuming cursors.
 
 ## Ending a task
 
