@@ -202,6 +202,9 @@ reciprocal rank fusion inside the module. Filters: date range, `who`
 
 The header is what makes fan-out decisions cheap and deterministic. The
 skill reads it and acts; it never counts, estimates or partitions in prose.
+The field-by-field contract (one hit per record, `chunk_tokens` default
+80,000, RRF and limits, `who` expansion, coverage, the `read` cap and the
+plain-text wire form) is on wayfinder #10, decided 2026-09-08.
 
 **Read.** `read(ref)` returns a paragraph, a range or a whole record,
 verbatim, capped, with a ref to continue.

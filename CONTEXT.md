@@ -97,8 +97,31 @@ anchor identity. The only irreplaceable per-project state besides `notes/`.
 `rm -rf .strata/cache/`, then sync replays the ledger.
 
 **Header** - what search returns before hits: totals, estimated tokens, counts by
-month, digests already covering the window, suggested chunks. What makes fan-out
-decisions cheap and deterministic.
+month, undated and inferred counts, digests already covering the window,
+suggested chunks, how many hits are shown, and the reply's own size. What makes
+fan-out decisions cheap and deterministic; the skill reads it and never counts
+or partitions in prose. Totals count what matched the words and filters, never
+what is semantically near.
+
+**Hit** - one matched record, shown as ref, date, kind and title, with a
+snippet when there was a query. One hit per record, never per paragraph; its
+ref is the anchor of the best-matching paragraph.
+
+**Chunk** - a contiguous run of days the header suggests one reader take,
+sized to the chunk budget. Days a digest already covers are left out. A day
+too big for one chunk is split, and those chunks name their first and last
+ref.
+
+**Chunk budget** - the server-side size of one chunk, in estimated tokens,
+sized for the reader. Independent of the in-session budget, which the skill
+owns and which sizes the session's own model.
+
+**Coverage** - a digest's window overlapping the searched range. Reported so
+the skill can skip what is already digested; applied only to chunk
+suggestion, never subtracted from the totals.
+
+**Reply size** - the estimated tokens of a search or read reply, stated at
+its end so the skill can tell when a session should compact.
 
 **Drift report** - what a reconversion tells the user changed. Contents not yet
 decided.
