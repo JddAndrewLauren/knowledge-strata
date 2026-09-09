@@ -138,6 +138,21 @@ memoir over the corpus with its notes and a machine-local config template. Both
 the thing shown working end to end and the fixture source for the manuscript and
 notes adapters.
 
+**Fixture** - invented material a test runs against. Structurally faithful to
+the real corpus (the stray header line, CRLF, the ZL footer, a template date in
+docx metadata) and textually made up, with RFC 2606 addresses and people who do
+not exist. Never a copy of a real file, scrubbed or otherwise. The demo project's
+`sources/` folder is the fixture corpus for the sources adapter.
+
+**Hermetic** - a test that needs no network, no model download and no path
+outside the clone. Every test in the ordinary suite is hermetic, and the suite
+shows zero skips: a skipped test is a failed one.
+
+**Enron tier** - the one end-to-end test that is not hermetic, marked `e2e` and
+deselected by default. Runs on the author's machine against the real corpus
+with the real embedder, and is the only place scale is proven. Build issues call
+what it covers *demonstrated*; what the hermetic tiers cover is *verified*.
+
 ## Project folder
 
 **Project** - a folder holding `.strata/`, `notes/`, `.mcp.json` and a
