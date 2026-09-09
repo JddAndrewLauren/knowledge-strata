@@ -105,6 +105,8 @@ Everything the index knows arrives as a Record:
     type        note only: the note's folder under notes/ (open vocabulary;
                 project and digest are reserved)
     date        ISO date or empty, with confidence: exact | inferred | unknown
+                and granularity: day | month | year (partial dates store the
+                first of their period; filters use period overlap)
     date_text   the source's own wording, for display
     title       extractive gist: subject line, first sentence, heading
     paragraphs  text, in order
@@ -137,12 +139,18 @@ Interface: raw unit (bytes, path, kind, converter metadata) in; ISO-sortable
 date, confidence, and the verbatim wording out. Converters do not touch date
 fields.
 
-Internal strategies, tried in order, each an internal seam tested through
-the one interface: transport headers (email), document metadata (docx core
-properties, pdf info), path patterns (`2013-11-04-journal.md`,
-`2013/November/`), the body's first line, and a per-collection rule from
-config. A date that no strategy produces is empty with confidence `unknown`;
-no invented date.
+Internal strategies, tried in order, first hit wins, each an internal seam
+tested through the one interface: transport headers (email `Date`, then
+`Received`), the unit's first line or leading heading, path patterns
+(`2013-11-04-journal.md`, `2013/November/`), and document metadata (docx
+core properties, pdf info; never `exact`, scans `unknown`). The author's own
+words about a date beat every non-email piece of metadata, filenames
+included. Per-collection rules from config are deferred until a real archive
+defeats these four. A date that no strategy produces is empty with confidence
+`unknown`; no invented date, and an ambiguous all-numeric date keeps only its
+year. Dates are a hint, not a gate: search never drops a record because it is
+undated, and a hit never shows a partial date as a day. Sources run the whole
+chain, manuscript chapters only first line and path, notes none.
 
 One date now. A journal entry written on X about X-30 is the failure to
 watch for; "about" is a second output the same seam can grow, not a field

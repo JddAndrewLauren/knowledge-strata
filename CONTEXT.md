@@ -50,9 +50,21 @@ straightened, whitespace collapsed, trimmed. Never what gets stored.
 fields are rejected at construction rather than documented.
 
 **Date** - a value object: ISO-sortable date, confidence (`exact` / `inferred` /
-`unknown`), and the source's own wording. Empty date exactly when confidence is
-`unknown` - there is no invented date. One date, not memoria's recorded/event
-pair.
+`unknown`), granularity (`day` / `month` / `year`), and the source's own wording.
+Empty date exactly when confidence is `unknown` - there is no invented date. One
+date, not memoria's recorded/event pair. A hint for search, never a gate: a date
+filter drops only what is known to fall outside the range.
+
+**Partial date** - a date known only to a month or a year (a `2013/November/`
+folder, an all-numeric `11/4/2013` whose day and month cannot be told apart).
+Stored as the first of its period with confidence `inferred` and its granularity
+set, so it sorts and filters by period overlap. A hit shows it at its own
+granularity, `2013-11 (folder)`, and never the stored first day.
+
+**Dating strategy** - one internal rung of the dating module, tried in order,
+first hit wins: email headers, the unit's first line or heading, path patterns,
+docx/pdf metadata. Sources run the whole chain, manuscript chapters only the
+first-line and path rungs, notes none.
 
 **Title** (also **gist**) - the extractive one-liner every hit carries, so a scan
 of many hits is cheap. Adapter-supplied, never empty, never model-written.
