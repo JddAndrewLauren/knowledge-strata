@@ -12,14 +12,15 @@ tokens, chunks, sessions or modes to them; the two exceptions are marked below.
 
 ## Settings
 
-Adjust after the first real corpus. These size *this* session's model; the
-server's `chunk_tokens` sizes the reader and is a different number.
+Adjust after the first real corpus. These size *this* session's model, assumed to
+have a 1M-token window; the server's `chunk_tokens` sizes the reader and is a
+different number.
 
 | setting | value | meaning |
 |---|---|---|
-| `in_session_budget` | 60000 | largest `tokens` figure in a search header you read directly rather than fanning out |
+| `direct_read_max` | 60000 | largest `tokens` figure in a search header you read directly rather than fanning out |
 | `reader_concurrency` | 4 | readers running at once during a fan-out |
-| `compact_at` | 150000 | summed `reply_tokens` across the task at which you advise compacting |
+| `compact_at` | 600000 | summed `reply_tokens` across the task at which you advise compacting |
 
 ## The two tools
 
@@ -49,7 +50,7 @@ reply_tokens ~5400
 ```
 
 - `tokens` is the cost of reading every matched record in full. Compare it
-  with `in_session_budget`.
+  with `direct_read_max`.
 - `covered` lists digests already written over part of the range. Days inside
   them are already left out of `chunks`. Read the digest instead of the sources;
   search a covered span explicitly only when the digest does not fit the
@@ -82,7 +83,7 @@ asking which.
 2. If a note answers the question, read it first. Notes are hits like any
    other; a `who` search surfaces the person's own note. A digest over the
    range is the summary you would otherwise write.
-3. If `tokens` fits `in_session_budget`, read the hits you need and answer.
+3. If `tokens` fits `direct_read_max`, read the hits you need and answer.
    Otherwise run the fan-out below.
 4. After answering, update the notes (see *Notes*), then commit.
 
@@ -92,7 +93,7 @@ For a scope too large to read in this session. Readers are `strata-reader`
 subagents; they return a digest in a fixed shape and never write anything.
 
 1. Search the scope. Skip whatever `covered` already digests.
-2. If `tokens` fits `in_session_budget`, read directly and stop here.
+2. If `tokens` fits `direct_read_max`, read directly and stop here.
 3. Otherwise take the header's `chunks` as they stand: one reader per row.
    Give a reader the row verbatim, including `first..last` when present; a
    reader given a split day searches that day and reads between the bounds in
