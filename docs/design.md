@@ -165,8 +165,10 @@ of memoria's `references.py` - see "What is reused", not the whole module).
 - **Source refs are durable.** `SRC-000184 p17`. A source record is frozen
   the first time it is indexed: its paragraph text and anchors do not change.
   If the raw file changes or a converter is bumped, reconversion produces a
-  new version with a drift report; old refs keep resolving to the frozen
-  text they cited. Memoria's positional anchors that shift silently on edit
+  new version silently; anchors that vanish are retired and their text kept
+  in the ledger, so old refs keep resolving to the frozen text they cited
+  and `read` says when one is retired (wayfinder #15). There is no drift
+  report artifact. Memoria's positional anchors that shift silently on edit
   are the failure this prevents.
 - **Manuscript refs are positional.** `manuscript/ch24.md # heading`. Never
   finer, never stored in a note as if durable. The skill enforces this by

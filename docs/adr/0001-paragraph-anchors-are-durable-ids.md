@@ -56,6 +56,7 @@ which.**
                            units(id, path, sha256, deleted)
                            versions(id, n, converter, at)
                            anchors(id, p, key_hash, added_v, retired_v)
+                           retired_text(anchor_id, text)
       cache/
         index.db         disposable, gitignored
 
@@ -80,6 +81,17 @@ foot-gun. Deleting the wrong one breaks every citation in the project silently.
   here, and they exist to serve one word in principle 1: *persistent*. If this
   effort ever sheds scope, this is the candidate, and shedding it means accepting
   that citations decay.
+
+## Amendment 2026-09-08 (wayfinder #15, reconversion policy)
+
+Rebuild reconverts from the raw file, so once a file has changed, a vanished
+paragraph's bytes cannot be regenerated from anything. The ledger therefore
+holds `retired_text(anchor_id, text)`, written at retirement time for the
+paragraphs that vanish and never for matched ones. Superseded versions are not
+stored as such; retired paragraphs are the citations' collateral, and they are
+never pruned. Reconversion is silent (no threshold, no confirmation), and there
+is no drift report artifact: drift is ledger state, surfaced by `read` on a
+retired anchor and by one CLI stdout line per changed record.
 
 ## This partially reverses memoria ADR-0006
 

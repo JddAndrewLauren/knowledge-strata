@@ -35,7 +35,17 @@ durable.
 not a position: `p17` may be the 12th paragraph in document order.
 
 **Retired anchor** - a number whose paragraph vanished at some version. Never
-reused, and `read` says so rather than resolving it to a neighbour.
+reused, and `read` says so rather than resolving it to a neighbour: a marker line
+naming the version it retired at, the verbatim text it cited, and a pointer to
+the bare record ref. Never a suggested replacement.
+
+**Retired text** - the verbatim paragraph behind a retired anchor, copied into the
+ledger at the moment it vanishes and never pruned. The only text the ledger
+holds; matched paragraphs live in the current version.
+
+**Drift** - what a reconversion changed: anchors kept, retired and added. Ledger
+state, not a report. Surfaced lazily by `read` on a retired anchor; the CLI
+prints one line per changed record. Reconversion never asks for confirmation.
 
 **Match key** - the normalized form of a paragraph used only for aligning a
 reconversion to existing anchors: NFKC, casefolded, quotes and dashes
@@ -90,8 +100,9 @@ filter expands through the aliases of every note, whatever its type.
 
 ## Storage
 
-**Ledger** (`.strata/ledger.db`) - durable, never dropped. Ids, versions and
-anchor identity. The only irreplaceable per-project state besides `notes/`.
+**Ledger** (`.strata/ledger.db`) - durable, never dropped. Ids, versions,
+anchor identity and retired text. The only irreplaceable per-project state
+besides `notes/`.
 
 **Index** (`.strata/cache/index.db`) - derived and disposable. Rebuild is
 `rm -rf .strata/cache/`, then sync replays the ledger.
