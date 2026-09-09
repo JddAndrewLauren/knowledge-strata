@@ -18,9 +18,9 @@ different number.
 
 | setting | value | meaning |
 |---|---|---|
-| `direct_read_max` | 60000 | largest `tokens` figure in a search header you read directly rather than fanning out |
+| `direct_read_max` | 100000 | largest `tokens` figure in a search header you read directly rather than fanning out |
 | `reader_concurrency` | 4 | readers running at once during a fan-out |
-| `compact_at` | 600000 | summed `reply_tokens` across the task at which you advise compacting |
+| `compact_at` | 850000 | summed `reply_tokens` across the task at which you advise compacting |
 
 ## The two tools
 
