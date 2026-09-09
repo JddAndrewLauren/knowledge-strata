@@ -65,30 +65,49 @@ A hit is one record: ref, date, kind, title, `(n matches)`, and on query
 searches one snippet line. Its ref is the best paragraph's anchor: `read` it for
 the paragraph, the bare id for the record. `p17` is an id, not a position.
 
-## Working
+## Input
 
-- **Notes first.** Read `notes/project.md` at the start of any task that
-  touches the manuscript or spans more than a passing question. Notes are
-  ordinary hits; when one covers the question, read it before the sources.
-  Threads that began before the scope live in notes, not in re-searching.
-- **Scope by dates.** Bound the work with `from`/`to` whenever the request
-  allows; use `who` for a person (it expands through their note's aliases) and
-  `kind` when the user named notes or the manuscript. When a scope has no
-  natural bound, ask one question rather than guess.
-- **Read or fan out.** If `tokens` fits `direct_read_max`, read what you need.
-  Otherwise fan out, below.
+Input is the primary activity. Before producing anything, use `search` and
+`read` to find as much relevant context as the scope allows, across all three
+kinds: the corpus, the notes and the manuscript. The archive is what the user
+cannot hold; a thin reading gives a thin result.
+
+- **Notes.** Read `notes/project.md` for anything beyond a passing question;
+  it is the running memory of the project. Search `kind: note` for the people,
+  events and themes the request names. A note carries the threads that began
+  before the scope, so they never need re-searching. A digest over the range is
+  a summary already written.
+- **Corpus.** Bound with `from`/`to` whenever the request allows; `who` for a
+  person (it expands through their note's aliases). Search both ways: a
+  timeline browse of the window for what happened, and word searches for the
+  specific things asked about. When a scope has no natural bound, ask one
+  question rather than guess.
+- **Manuscript.** Search `kind: manuscript` for what the book already says
+  about the scope, so what you produce agrees with it.
+- **Read or fan out.** If a header's `tokens` fits `direct_read_max`, read what
+  you need. Otherwise fan out (below) and read from the digests.
+- **Verbatim only from `read`.** Snippets, titles and digest bullets locate
+  text; they are never quoted.
+
+## Output
+
+Output is anything produced from the input: an answer, a note, manuscript
+text. Every output is preceded by the input above, and by one more read:
+
+- **The neighbouring manuscript, regardless of the request.** When a
+  manuscript is configured, `read` what precedes the point the work touches
+  (the previous chapter or section, at least its tail) and what follows it,
+  and note the heading style and file naming. New text continues the book and
+  never starts over; answers and notes agree with what is already written.
 - **Shape follows phrasing.** A question about what happened gets a synthesis;
   a request to see something gets the text. No flags, no asking which.
-- **Verbatim only from `read`.** Never quote from a snippet, a title or a digest
-  bullet.
-- **Manuscript context.** Before writing into the manuscript, read the tail of
-  what precedes the insertion point and match its heading style and file
-  naming. Write with your own Write and Edit tools; there are no write tools on
-  the server and none are needed.
+- **Write with your own tools.** Write and Edit, into the manuscript or
+  `notes/`; the server has no write tools and needs none. Quote sources only
+  from `read` output.
 - **Record.** Every manuscript change appends one paragraph to
   `notes/project.md`: dates covered, people active, threads opened or closed,
-  themes touched, file and heading. Every answer or change that was *about* a
-  thing updates that thing's note (see *Notes*). Then commit.
+  themes touched, file and heading. Every output that was *about* a thing
+  updates that thing's note (see *Notes*). Then commit.
 
 ## Fan-out
 
