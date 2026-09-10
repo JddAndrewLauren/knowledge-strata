@@ -1,0 +1,8 @@
+# west-desk demo project. Copy to .strata/config.yaml, or run
+#   strata init --corpus ./sources --manuscript ./manuscript
+# in this folder, which writes it for you. Paths are what you typed; the
+# invented sources shipped with the demo are the default. The author's
+# override points corpus at the Enron root instead.
+corpus:
+  - ./sources
+manuscript: ./manuscript

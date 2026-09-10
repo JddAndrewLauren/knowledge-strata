@@ -1,0 +1,5 @@
+Desk glossary
+
+Derate: a reduction of the tie's rated capacity posted by the operator.
+Cutoff: the hour after which the operator refuses a schedule.
+The book: the position ledger Ruth keeps after the reorganisation.
