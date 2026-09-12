@@ -64,3 +64,32 @@ def test_who_with_no_matching_note_matches_only_the_literal_string(index):
     index.sync([rec, other])
     hits = {h.ref for h in index.search(who="Dave").hits}
     assert hits == {rec.ref}
+
+
+def test_who_priya_and_pv_expand_through_the_same_note_to_one_alias_set(index):
+    """The checkbox's own words: ``who: Priya`` and ``who: PV`` both expand
+    through ``priya-venkataraman.md`` and match the header paragraph of her
+    emails as a phrase."""
+    ledger = index._ledger
+    note = make_note(
+        "notes/person/priya-venkataraman.md",
+        ["Priya Venkataraman works the west desk."],
+        type="person",
+        aliases=("Priya", "PV", "Priya.Venkataraman@example.com"),
+        title="Priya Venkataraman",
+    )
+    email = make_source(
+        ledger,
+        "email1.eml",
+        ["From: Priya.Venkataraman@example.com\nTo: desk@example.com\n\nThe schedule moved."],
+        date=exact("2001-06-01"),
+    )
+    other = make_source(ledger, "email2.eml", ["From: someone@example.com\n\nPV said the outage cleared."], date=exact("2001-06-02"))
+    unrelated = make_source(ledger, "other.txt", ["No one named here."], date=exact("2001-06-03"))
+    index.sync([note, email, other, unrelated])
+
+    by_priya = {h.ref.split(" ")[0] for h in index.search(who="Priya").hits}
+    by_pv = {h.ref.split(" ")[0] for h in index.search(who="PV").hits}
+    assert by_priya == by_pv == {note.ref, email.ref, other.ref}
+    # the match sits in the email's header paragraph (its first), cited as such
+    assert f"{email.ref} p1" in {h.ref for h in index.search("schedule", who="priya").hits}

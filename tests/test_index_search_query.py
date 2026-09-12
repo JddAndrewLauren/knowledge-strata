@@ -125,3 +125,56 @@ def test_rrf_favors_a_record_matching_both_branches(tmp_path, ledger):
     reply = index.search("cutoff")
     assert reply.hits[0].ref == f"{both.ref} p1"
     index.close()
+
+
+def test_a_record_past_sqlites_bound_variable_limit_searches_with_the_semantic_branch(tmp_path, ledger):
+    """The reviewer's P2: 33,000 paragraphs in one record (past SQLite's
+    32,766 bound variables) must query cleanly on both branches, with every
+    filter applied inside the KNN rather than through an IN list."""
+    index = hybrid_index(tmp_path, ledger)
+    paragraphs = [f"Paragraph number {i} of the long file." for i in range(33_000)]
+    rec = make_source(ledger, "long.txt", paragraphs, date=exact("2001-06-01"))
+    index.sync([rec])
+
+    reply = index.search("Paragraph number 5")
+    assert reply.lexical_paragraphs == 1 and reply.evidence_records == 1
+    assert reply.hits[0].ref == f"{rec.ref} p6"
+
+    wide = index.search("long file", from_="2001", to="2001", kind="source")
+    assert wide.lexical_paragraphs == 33_000
+    assert wide.evidence_records == 1 and wide.hits[0].matches == 33_000
+    assert index.search("long file", who="nobody").evidence_records == 0
+    assert index.search().evidence_paragraphs == 33_000
+    index.close()
+
+
+def test_semantic_filters_match_the_lexical_predicate(tmp_path, ledger):
+    """kind, period overlap (unknown always passes) and who narrow the
+    semantic branch exactly as they narrow the lexical one."""
+    embedder = FakeEmbedder(topics={"outage": "tie-outage"})
+    texts = {
+        "june": "The interconnection tripped in June.",
+        "july": "The interconnection tripped in July.",
+        "undated": "The interconnection tripped, date unknown.",
+        "note": "Outage theme: the interconnection tripped.",
+    }
+    for text in texts.values():
+        embedder.place(text, "tie-outage")
+    index = hybrid_index(tmp_path, ledger, embedder)
+    from factories import make_note, unknown
+
+    june = make_source(ledger, "june.txt", [texts["june"]], date=exact("2001-06-19"))
+    july = make_source(ledger, "july.txt", [texts["july"]], date=exact("2001-07-02"))
+    undated = make_source(ledger, "undated.txt", [texts["undated"]], date=unknown())
+    note = make_note("notes/theme/outage.md", [texts["note"]], type="theme", aliases=("tie",))
+    index.sync([june, july, undated, note])
+
+    def refs(**filters):
+        return {h.ref.split(" ")[0] for h in index.search("outage", **filters).hits}
+
+    assert refs() == {june.ref, july.ref, undated.ref, note.ref}
+    assert refs(from_="2001-06", to="2001-06") == {june.ref, undated.ref, note.ref}
+    assert refs(kind="source") == {june.ref, july.ref, undated.ref}
+    assert refs(from_="2001-07-01", to="2001-07-31", kind="source") == {july.ref, undated.ref}
+    assert refs(who="tie") == {note.ref}  # the alias set matches only the note's own text
+    index.close()

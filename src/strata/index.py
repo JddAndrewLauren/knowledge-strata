@@ -21,8 +21,11 @@ Three responsibilities behind two methods, plus freshness:
   (k=60, equal weights) over lexical (FTS5, unlimited) and semantic
   (sqlite-vec, top 200) paragraph matches under identical filters, one hit
   per record at its best-scoring paragraph.
-- ``read(ref, cursor)`` returns verbatim text for any ref shape, paged at
-  paragraph or (inside an oversized paragraph) Unicode character boundaries.
+- ``read(ref, cursor)`` returns verbatim text for any ref shape as a
+  :class:`ReadReply`: transport labels (the ref line, warning and
+  retired-anchor markers, a citation per source paragraph) kept apart from
+  the exact payload, paged at paragraph boundaries or, inside an oversized
+  paragraph, at Unicode character boundaries.
 
 Enumeration is simplified relative to a web-scale design: at this project's
 target size (a personal corpus, python-stack.md), recomputing a query's full
@@ -32,6 +35,9 @@ property the acceptance gate actually requires. A single opaque cursor per
 reply resumes every unfinished list (hits, by_month, covered, chunks)
 together, rather than issuing one cursor per list; CONTEXT.md's "a cursor
 alone resumes exact scope" is read as one cursor per reply, not per field.
+An assignment cursor (a ``chunks`` row's) is the same shape plus a compact
+scope - the first and last plan key of its slice - and executes exactly
+that slice of the plan, recomputed at the same revision.
 """
 
 from __future__ import annotations
@@ -115,6 +121,25 @@ def _period_bounds_of(date: Date) -> tuple[str, str] | None:
     return f"{year:04d}-01-01", f"{year:04d}-12-31"
 
 
+UNKNOWN_PERIOD = (0, 99_999_999)
+
+
+def _period_ints(date: Date) -> tuple[int, int]:
+    """The record's period as ``YYYYMMDD`` integers for the vec0 metadata
+    columns; ``unknown`` spans everything so it passes every range, the
+    same rule :func:`passes_range` applies on the lexical side."""
+    bounds = _period_bounds_of(date)
+    if bounds is None:
+        return UNKNOWN_PERIOD
+    return int(bounds[0].replace("-", "")), int(bounds[1].replace("-", ""))
+
+
+def _range_ints(from_: str | None, to: str | None) -> tuple[int, int]:
+    start = _period_spec_bounds(from_)[0] if from_ else "0000-01-01"
+    end = _period_spec_bounds(to)[1] if to else "9999-12-31"
+    return int(start.replace("-", "")), int(end.replace("-", ""))
+
+
 def passes_range(date: Date, from_: str | None, to: str | None) -> bool:
     """A record is dropped only when its period lies entirely outside the
     range; ``unknown`` always passes (design.md, dates are a hint)."""
@@ -174,14 +199,31 @@ class _HitSpec:
     matches: int
     score: float
     is_lexical: bool
+    lexical_matches: int = 0
+    paragraphs: int = 1
+
+
+@dataclass(frozen=True)
+class _Assignment:
+    """One entry of a chunk plan: contiguous records in plan order, their
+    estimated cost, and ``segment=(k, n)`` for the k-th bounded read segment
+    of one oversized record."""
+
+    refs: list[str]
+    tokens: int
+    segment: tuple[int, int] | None = None
+
+
+def _plan_key(row: sqlite3.Row) -> list:
+    """Plan order (#10 ss4): date, then ref, unknown last; a partial date
+    sorts by its period start. A JSON-friendly list, because an assignment
+    cursor carries its first and last key as its compact scope."""
+    return [int(row["confidence"] == "unknown"), row["iso"], row["ref"]]
 
 
 @dataclass(frozen=True)
 class _QueryEvidence:
     specs: list[_HitSpec]
-    lexical_records: int
-    lexical_paragraphs: int
-    evidence_paragraphs: int
     paragraph_rows: dict[int, sqlite3.Row]
 
 
@@ -198,39 +240,83 @@ def _safe_char_cut(text: str, max_bytes: int) -> int:
             break
         total += char_len
         cut = index + 1
-    while 0 < cut < len(text) and unicodedata.combining(text[cut]) != 0:
+    while 0 < cut < len(text) and _joins_previous(text, cut):
         cut -= 1
     return cut
 
 
-def _paginate(segments: list[str], start_para: int, start_char: int, budget_bytes: int) -> tuple[str, dict | None]:
-    """Walk ``segments`` (paragraph-sized units) from ``(start_para,
-    start_char)``, filling ``budget_bytes``: whole segments join with a
-    blank line; a segment that alone exceeds the remaining budget is cut at
-    a safe character boundary and resumed exactly where it left off next
-    time - no separator at the cut, so concatenating pages reproduces the
-    exact text (design.md "Read")."""
-    pieces: list[str] = []
-    total_bytes = 0
+def _joins_previous(text: str, index: int) -> bool:
+    """``text[index]`` may not be separated from ``text[index - 1]``: a
+    combining mark, or the ``\\n`` of a CRLF pair."""
+    char = text[index]
+    return unicodedata.combining(char) != 0 or (char == "\n" and text[index - 1] == "\r")
+
+
+def _minimum_cut(text: str) -> int:
+    """The shortest non-empty prefix that ends on a safe boundary."""
+    cut = 1
+    while cut < len(text) and _joins_previous(text, cut):
+        cut += 1
+    return cut
+
+
+PARAGRAPH_SEPARATOR = "\n\n"
+
+
+@dataclass(frozen=True)
+class ReadPiece:
+    """One paragraph, or the fragment of one, on a read page. ``label`` is a
+    transport label (a source paragraph's citation), never payload; ``text``
+    and ``separator`` are exact stored characters. The separator that
+    follows a paragraph belongs to the page that finishes the paragraph, so
+    the pages' payloads concatenate to the selection's exact stored text
+    (design.md "Read")."""
+
+    label: str | None
+    text: str
+    separator: str
+
+    def payload(self) -> str:
+        return self.text + self.separator
+
+
+def _paginate(
+    units: list[tuple[str | None, str]], start_para: int, start_char: int, budget_bytes: int
+) -> tuple[list[ReadPiece], dict | None]:
+    """Walk ``units`` (``(label, paragraph)`` pairs) from ``(start_para,
+    start_char)``, filling ``budget_bytes`` with labels, text and owned
+    separators. A page breaks at a paragraph boundary whenever it can; only
+    a paragraph that alone exceeds a whole page is cut, at a safe character
+    boundary, without its separator, and resumed exactly where it left off
+    next time (design.md "Read")."""
+    pieces: list[ReadPiece] = []
+    total = 0
     para, char = start_para, start_char
-    while para < len(segments):
-        remaining_text = segments[para][char:]
-        remaining_bytes = len(remaining_text.encode("utf-8"))
-        if total_bytes + remaining_bytes <= budget_bytes:
-            pieces.append(remaining_text)
-            total_bytes += remaining_bytes
+    while para < len(units):
+        label, text = units[para]
+        if char and label:
+            label = f"{label} (continued)"
+        remaining = text[char:]
+        separator = PARAGRAPH_SEPARATOR if para < len(units) - 1 else ""
+        label_bytes = len(label.encode("utf-8")) + 1 if label else 0
+        needed = label_bytes + len(remaining.encode("utf-8")) + len(separator)
+        if total + needed <= budget_bytes:
+            pieces.append(ReadPiece(label, remaining, separator))
+            total += needed
             para += 1
             char = 0
             continue
-        budget_left = budget_bytes - total_bytes
-        cut = _safe_char_cut(remaining_text, budget_left) if budget_left > 0 else 0
+        if pieces:
+            break  # the next paragraph starts a page of its own
+        room = budget_bytes - label_bytes
+        cut = _safe_char_cut(remaining, room) if room > 0 else 0
         if cut <= 0:
-            break
-        pieces.append(remaining_text[:cut])
-        return "\n\n".join(pieces), {"para": para, "char": char + cut}
-    if para >= len(segments):
-        return "\n\n".join(pieces), None
-    return "\n\n".join(pieces), {"para": para, "char": char}
+            cut = _minimum_cut(remaining)  # a page always advances
+        pieces.append(ReadPiece(label, remaining[:cut], ""))
+        return pieces, {"para": para, "char": char + cut}
+    if para >= len(units):
+        return pieces, None
+    return pieces, {"para": para, "char": char}
 
 
 def _heading_depth(paragraph: str) -> int | None:
@@ -316,15 +402,23 @@ class CoveredRow:
 
 @dataclass(frozen=True)
 class ChunkRow:
+    """One executable reader assignment (CONTEXT.md "Chunk"): its scope,
+    record count, estimated cost and cursor. ``segment`` is ``(k, n)`` when
+    the assignment is the k-th of n bounded read segments of one oversized
+    record; such a record is read only once every segment is."""
+
     from_: str
     to: str
     records: int
     tokens: int
     cursor: str
-    segments: int = 1
+    segment: tuple[int, int] | None = None
 
     def line(self) -> str:
-        return f"{self.from_}..{self.to}  {self.records} records  ~{self.tokens}  {self.cursor}"
+        head = f"{self.from_}..{self.to}  {self.records} records  ~{self.tokens}"
+        if self.segment is not None:
+            head += f"  segment {self.segment[0]} of {self.segment[1]}"
+        return f"{head}  {self.cursor}"
 
 
 @dataclass(frozen=True)
@@ -354,16 +448,29 @@ class SearchReply:
 
 @dataclass(frozen=True)
 class ReadReply:
+    """``labels`` are the transport lines ahead of the text: the selection's
+    ref, date, kind and title, then any warning or retired-anchor markers.
+    ``pieces`` carry this page's payload; ``body`` is that payload alone,
+    exact stored characters and nothing else."""
+
     ref: str
-    body: str
+    labels: tuple[str, ...]
+    pieces: tuple[ReadPiece, ...]
     continuation: str | None
     reply_tokens: int = 0
 
+    @property
+    def body(self) -> str:
+        return "".join(piece.payload() for piece in self.pieces)
+
     def text(self) -> str:
-        body = self.body
+        stream = "".join((f"{piece.label}\n" if piece.label else "") + piece.payload() for piece in self.pieces)
+        out = "\n".join(self.labels) + "\n\n" + stream if self.labels else stream
         if self.continuation:
-            body = f"{body}\n[continues: {self.continuation}]"
-        return f"{body}\nreply_tokens ~{self.reply_tokens}"
+            if not out.endswith("\n"):
+                out += "\n"
+            out += f"[continues: {self.continuation}]"
+        return f"{out}\nreply_tokens ~{self.reply_tokens}"
 
 
 def _with_read_reply_tokens(reply: ReadReply) -> ReadReply:
@@ -455,7 +562,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS title_fts USING fts5(
     ref UNINDEXED, title, tokenize='unicode61'
 );
 CREATE TABLE IF NOT EXISTS embedding_cache (content_hash TEXT PRIMARY KEY, vector BLOB NOT NULL);
+CREATE TEMP TABLE IF NOT EXISTS who_refs (ref TEXT PRIMARY KEY);
 """
+
+# Bumped whenever paragraph_vec's shape changes; stored beside the embedder
+# identity so an older cache file rebuilds its vectors instead of failing.
+_VEC_SCHEMA = "2"
+SQL_BATCH = 500  # well under every SQLite build's bound-variable limit
 
 
 def _hash_text(*parts: str) -> str:
@@ -556,10 +669,9 @@ class Index:
         return row is not None
 
     def _ensure_embedder_identity(self) -> None:
-        stored_model = self._get_meta("embedder_model")
-        stored_dim = self._get_meta("embedder_dim")
-        current_model, current_dim = self._embedder.model_id, str(self._embedder.dim)
-        if stored_model == current_model and stored_dim == current_dim:
+        stored = (self._get_meta("embedder_model"), self._get_meta("embedder_dim"), self._get_meta("vec_schema"))
+        current = (self._embedder.model_id, str(self._embedder.dim), _VEC_SCHEMA)
+        if stored == current:
             return
         # A model change invalidates every cached vector; re-embed whatever
         # is already indexed right away, rather than waiting for the next
@@ -568,15 +680,25 @@ class Index:
         self._conn.execute("DROP TABLE IF EXISTS paragraph_vec")
         self._conn.execute("DELETE FROM embedding_cache")
         if self._vec_ok:
+            # kind and the period as vec0 metadata columns, so the semantic
+            # branch applies the same filters as the lexical one inside the
+            # KNN rather than through a bounded IN list (python-stack.md).
             self._conn.execute(
                 f"CREATE VIRTUAL TABLE paragraph_vec USING vec0("
-                f"paragraph_id INTEGER PRIMARY KEY, embedding FLOAT[{self._embedder.dim}])"
+                f"paragraph_id INTEGER PRIMARY KEY, embedding FLOAT[{self._embedder.dim}], "
+                f"kind TEXT, period_start INTEGER, period_end INTEGER)"
             )
-        self._set_meta("embedder_model", current_model)
-        self._set_meta("embedder_dim", current_dim)
-        existing = self._conn.execute("SELECT id, text, content_hash FROM paragraphs").fetchall()
+        for key, value in zip(("embedder_model", "embedder_dim", "vec_schema"), current):
+            self._set_meta(key, value)
+        existing = self._conn.execute(
+            "SELECT p.id AS id, p.text AS text, p.content_hash AS content_hash, r.kind AS kind, "
+            "r.iso AS iso, r.confidence AS confidence, r.granularity AS granularity, r.date_text AS date_text "
+            "FROM paragraphs p JOIN records r ON r.ref = p.ref"
+        ).fetchall()
         if existing:
-            new_vectors = [(row["id"], row["content_hash"]) for row in existing]
+            new_vectors = [
+                (row["id"], row["content_hash"], row["kind"], *_period_ints(self._record_date(row))) for row in existing
+            ]
             text_of_hash = {row["content_hash"]: row["text"] for row in existing}
             self._embed_new(new_vectors, text_of_hash)
         self._bump_revision()
@@ -598,13 +720,18 @@ class Index:
     def index_revision(self) -> str:
         return f"{self._get_meta('epoch')}-{self._get_meta('revision')}"
 
-    def mark_complete(self, complete: bool = True) -> None:
-        self._set_meta("indexing", "complete" if complete else "incomplete")
+    def mark_complete(self, complete: bool = True, *, indexed: int | None = None) -> None:
+        """``complete``, or ``incomplete`` with progress (the records indexed
+        so far) so a caller can refuse completeness claims during a first
+        index (design.md "Index")."""
+        if indexed is None:
+            indexed = self._conn.execute("SELECT COUNT(*) AS n FROM records").fetchone()["n"]
+        self._set_meta("indexing", "complete" if complete else f"incomplete ({indexed} records indexed)")
         self._conn.commit()
 
     @property
     def indexing_state(self) -> str:
-        return self._get_meta("indexing") or "incomplete"
+        return self._get_meta("indexing") or "incomplete (0 records indexed)"
 
     # -- sync -----------------------------------------------------------------
 
@@ -677,7 +804,17 @@ class Index:
         )
         self._conn.execute("INSERT INTO title_fts (ref, title) VALUES (?, ?)", (record.ref, record.title))
         anchors = self._ledger.live_anchors(record.ref) if record.kind == "source" else []
-        new_vectors: list[tuple[int, str]] = []
+        if record.kind == "source" and len(anchors) != len(record.paragraphs):
+            # The ledger is an already-current collaborator: a sources
+            # adapter that forgot align() fails here, loudly, rather than
+            # indexing paragraphs that cite nothing (ADR-0001).
+            raise ValueError(
+                f"{record.ref}: the ledger holds {len(anchors)} live anchors for {len(record.paragraphs)} "
+                f"paragraphs; align() must run before sync()"
+            )
+        period_start, period_end = _period_ints(record.date)
+        new_vectors: list[tuple[int, str, str, int, int]] = []
+        text_of_hash: dict[str, str] = {}
         for idx, text in enumerate(record.paragraphs):
             p_hash = _hash_text(text)
             anchor = anchors[idx] if idx < len(anchors) else None
@@ -687,16 +824,20 @@ class Index:
             )
             pid = cur.lastrowid
             self._conn.execute("INSERT INTO paragraph_fts (rowid, text) VALUES (?, ?)", (pid, text))
-            new_vectors.append((pid, p_hash))
-        self._embed_new(new_vectors, {text_hash: text for text_hash, text in zip((h for _, h in new_vectors), record.paragraphs)})
+            new_vectors.append((pid, p_hash, record.kind, period_start, period_end))
+            text_of_hash[p_hash] = text
+        self._embed_new(new_vectors, text_of_hash)
 
-    def _embed_new(self, new_vectors: list[tuple[int, str]], text_of_hash: dict[str, str]) -> None:
+    def _embed_new(self, new_vectors: list[tuple[int, str, str, int, int]], text_of_hash: dict[str, str]) -> None:
+        """``new_vectors`` rows are ``(paragraph_id, content_hash, kind,
+        period_start, period_end)``; the last three land in the vec0
+        metadata columns beside the embedding."""
         if not new_vectors or not self._vec_ok:
             return
         to_embed: list[str] = []
         to_embed_hashes: list[str] = []
         cached: dict[str, tuple[float, ...]] = {}
-        for _, p_hash in new_vectors:
+        for _, p_hash, *_meta in new_vectors:
             if p_hash in cached:
                 continue
             row = self._conn.execute("SELECT vector FROM embedding_cache WHERE content_hash = ?", (p_hash,)).fetchone()
@@ -714,10 +855,11 @@ class Index:
                     (p_hash, _pack_vector(vector)),
                 )
         if self._vec_table_ready():
-            for pid, p_hash in new_vectors:
+            for pid, p_hash, kind, period_start, period_end in new_vectors:
                 self._conn.execute(
-                    "INSERT INTO paragraph_vec (paragraph_id, embedding) VALUES (?, ?)",
-                    (pid, _pack_vector(cached[p_hash])),
+                    "INSERT INTO paragraph_vec (paragraph_id, embedding, kind, period_start, period_end) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (pid, _pack_vector(cached[p_hash]), kind, period_start, period_end),
                 )
 
     @property
@@ -766,8 +908,9 @@ class Index:
     def _all_record_rows(self) -> list[sqlite3.Row]:
         return self._conn.execute("SELECT * FROM records").fetchall()
 
-    def _eligible_refs(self, *, from_: str | None, to: str | None, who: str | None, kind: str | None) -> set[str]:
-        who_matches = self._alias_matching_refs(self._alias_set(who)) if who else None
+    def _eligible_refs(
+        self, *, from_: str | None, to: str | None, who_matches: set[str] | None, kind: str | None
+    ) -> set[str]:
         eligible: set[str] = set()
         for row in self._all_record_rows():
             if kind and row["kind"] != kind:
@@ -793,28 +936,54 @@ class Index:
             (phrase,),
         ).fetchall()
 
-    def _semantic_paragraph_ids(self, query: str, candidate_ids: list[int]) -> list[int]:
-        if not candidate_ids or not self._vec_table_ready():
+    def _semantic_paragraph_ids(
+        self,
+        query: str,
+        *,
+        from_: str | None,
+        to: str | None,
+        kind: str | None,
+        who_matches: set[str] | None,
+    ) -> list[int]:
+        """The top ``SEMANTIC_K`` paragraphs under the same predicate the
+        lexical branch uses: ``kind`` and period overlap on the vec0
+        metadata columns, ``who`` as a rowid set (#10 ss7: one predicate,
+        two placements). Nothing here grows with the corpus, so a corpus
+        past SQLite's bound-variable limit is no different from a small one."""
+        if not self._vec_table_ready():
             return []
-        placeholders = ",".join("?" * len(candidate_ids))
-        qvector = _pack_vector(self._embedder.embed_query(query))
-        k = min(SEMANTIC_K, len(candidate_ids))
-        rows = self._conn.execute(
-            f"SELECT paragraph_id FROM paragraph_vec WHERE embedding MATCH ? AND k = ? "
-            f"AND paragraph_id IN ({placeholders}) ORDER BY distance",
-            (qvector, k, *candidate_ids),
-        ).fetchall()
-        return [row["paragraph_id"] for row in rows]
+        sql = "SELECT paragraph_id, distance FROM paragraph_vec WHERE embedding MATCH ? AND k = ?"
+        params: list = [_pack_vector(self._embedder.embed_query(query)), SEMANTIC_K]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if from_ or to:
+            range_start, range_end = _range_ints(from_, to)
+            sql += " AND period_start <= ? AND period_end >= ?"
+            params += [range_end, range_start]
+        if who_matches is not None:
+            self._conn.execute("DELETE FROM who_refs")
+            self._conn.executemany("INSERT INTO who_refs (ref) VALUES (?)", [(ref,) for ref in who_matches])
+            sql += " AND paragraph_id IN (SELECT id FROM paragraphs WHERE ref IN (SELECT ref FROM who_refs))"
+        rows = self._conn.execute(sql + " ORDER BY distance", params).fetchall()
+        # vec0 orders by distance alone; ties settle on paragraph id so a
+        # cursor re-running this query sees the same order.
+        ordered = sorted(rows, key=lambda row: (row["distance"], row["paragraph_id"]))
+        return [row["paragraph_id"] for row in ordered]
 
-    def _query_evidence(self, query: str, eligible: set[str]) -> "_QueryEvidence":
+    def _query_evidence(
+        self,
+        query: str,
+        eligible: set[str],
+        *,
+        from_: str | None,
+        to: str | None,
+        kind: str | None,
+        who_matches: set[str] | None,
+    ) -> "_QueryEvidence":
         all_lexical = [row for row in self._lexical_paragraph_rows(query) if row["ref"] in eligible]
         lexical_ids = [row["id"] for row in all_lexical]
-        candidate_ids = [
-            row["id"] for row in self._conn.execute("SELECT id FROM paragraphs WHERE ref IN ({})".format(
-                ",".join("?" * len(eligible)) or "NULL"
-            ), tuple(eligible))
-        ] if eligible else []
-        semantic_ids = self._semantic_paragraph_ids(query, candidate_ids)
+        semantic_ids = self._semantic_paragraph_ids(query, from_=from_, to=to, kind=kind, who_matches=who_matches)
 
         score: dict[int, float] = {}
         for rank, pid in enumerate(lexical_ids, start=1):
@@ -840,23 +1009,27 @@ class Index:
                     matches=len(pids),
                     score=score.get(best, 0.0),
                     is_lexical=best in lexical_set,
+                    lexical_matches=sum(1 for pid in pids if pid in lexical_set),
+                    paragraphs=len(pids),
                 )
             )
-        lexical_refs = {paragraph_rows[pid]["ref"] for pid in lexical_ids}
-        return _QueryEvidence(
-            specs=specs,
-            lexical_records=len(lexical_refs),
-            lexical_paragraphs=len(lexical_ids),
-            evidence_paragraphs=len(evidence_ids),
-            paragraph_rows=paragraph_rows,
-        )
+        return _QueryEvidence(specs=specs, paragraph_rows=paragraph_rows)
 
     def _paragraphs_by_id(self, ids: set[int]) -> dict[int, sqlite3.Row]:
-        if not ids:
-            return {}
-        placeholders = ",".join("?" * len(ids))
-        rows = self._conn.execute(f"SELECT * FROM paragraphs WHERE id IN ({placeholders})", tuple(ids)).fetchall()
-        return {row["id"]: row for row in rows}
+        found: dict[int, sqlite3.Row] = {}
+        pending = sorted(ids)
+        for start in range(0, len(pending), SQL_BATCH):
+            batch = pending[start : start + SQL_BATCH]
+            placeholders = ",".join("?" * len(batch))
+            for row in self._conn.execute(f"SELECT * FROM paragraphs WHERE id IN ({placeholders})", batch):
+                found[row["id"]] = row
+        return found
+
+    def _paragraph_counts(self) -> dict[str, int]:
+        return {
+            row["ref"]: row["n"]
+            for row in self._conn.execute("SELECT ref, COUNT(*) AS n FROM paragraphs GROUP BY ref")
+        }
 
     def _snippet(self, query: str, paragraph_id: int, is_lexical: bool, text: str) -> str:
         if is_lexical:
@@ -891,7 +1064,10 @@ class Index:
     ) -> SearchReply:
         """design.md "Two tools": every filter optional; an empty query with
         a date range is a timeline browse. A cursor alone resumes its
-        server-issued scope; any other argument alongside it is rejected."""
+        server-issued scope; any other argument alongside it is rejected.
+        An assignment cursor (a ``chunks`` row's) executes exactly its own
+        slice of the plan, in plan order, and pages like any other."""
+        scope = segment = None
         if cursor is not None:
             if query or from_ or to or who or kind:
                 raise CursorError("a cursor resumes its own scope alone; no other argument may accompany it")
@@ -906,39 +1082,66 @@ class Index:
                 )
             query, from_, to, who, kind = state["query"], state["from"], state["to"], state["who"], state["kind"]
             offsets = state["off"]
+            scope = state.get("scope")
+            segment = tuple(state["seg"]) if state.get("seg") else None
         else:
             offsets = {"hits": 0, "month": 0, "covered": 0, "chunks": 0}
 
-        eligible = self._eligible_refs(from_=from_, to=to, who=who, kind=kind)
+        who_matches = self._alias_matching_refs(self._alias_set(who)) if who else None
+        eligible = self._eligible_refs(from_=from_, to=to, who_matches=who_matches, kind=kind)
         record_rows = {row["ref"]: row for row in self._all_record_rows() if row["ref"] in eligible}
 
         if query:
-            evidence = self._query_evidence(query, eligible)
+            evidence = self._query_evidence(
+                query, eligible, from_=from_, to=to, kind=kind, who_matches=who_matches
+            )
             hit_specs = sorted(evidence.specs, key=lambda spec: (-spec.score, spec.ref))
-            lexical_records, lexical_paragraphs = evidence.lexical_records, evidence.lexical_paragraphs
-            evidence_paragraphs = evidence.evidence_paragraphs
             paragraph_rows = evidence.paragraph_rows
             hit_cap = QUERY_HIT_CAP
         else:
+            counts = self._paragraph_counts()
             hit_specs = [
-                _HitSpec(ref=ref, best_paragraph_id=None, matches=1, score=0.0, is_lexical=False)
+                _HitSpec(ref=ref, best_paragraph_id=None, matches=1, score=0.0, is_lexical=False, paragraphs=counts.get(ref, 0))
                 for ref in sorted(record_rows, key=lambda ref: _browse_key(record_rows[ref]))
             ]
-            lexical_records = lexical_paragraphs = 0
-            evidence_paragraphs = sum(
-                self._conn.execute("SELECT COUNT(*) AS n FROM paragraphs WHERE ref = ?", (ref,)).fetchone()["n"]
-                for ref in record_rows
-            )
             paragraph_rows = {}
             hit_cap = BROWSE_HIT_CAP
 
+        covered_all = self._covered(from_, to)
+        cursor_base = {
+            "t": "search",
+            "rev": self.index_revision,
+            "query": query,
+            "from": from_,
+            "to": to,
+            "who": who,
+            "kind": kind,
+        }
+        if scope is None:
+            plan = self._chunk_plan([spec.ref for spec in hit_specs], record_rows, covered_all)
+        else:
+            # The assignment's records: those whose plan key lies within the
+            # cursor's scope, in plan order. The plan is recomputed at the
+            # same revision, so the slice is the one that was issued.
+            lo, hi = scope
+            spec_of = {spec.ref: spec for spec in hit_specs}
+            candidates = self._plan_candidates(list(spec_of), record_rows, covered_all)
+            scoped = [ref for ref in candidates if lo <= _plan_key(record_rows[ref]) <= hi]
+            hit_specs = [spec_of[ref] for ref in scoped]
+            plan = [self._scoped_assignment(scoped, record_rows, segment)] if scoped else []
+            cursor_base["scope"] = scope
+            if segment:
+                cursor_base["seg"] = list(segment)
+
         evidence_refs = [spec.ref for spec in hit_specs]
+        lexical_records = sum(1 for spec in hit_specs if spec.lexical_matches)
+        lexical_paragraphs = sum(spec.lexical_matches for spec in hit_specs)
+        evidence_paragraphs = sum(spec.paragraphs for spec in hit_specs)
         tokens = sum(record_rows[ref]["tokens"] for ref in evidence_refs)
         undated = sum(1 for ref in evidence_refs if record_rows[ref]["confidence"] == "unknown")
         inferred = sum(1 for ref in evidence_refs if record_rows[ref]["confidence"] == "inferred")
         by_month_all = self._by_month(evidence_refs, record_rows)
-        covered_all = self._covered(from_, to)
-        chunks_all = self._chunk_plan(evidence_refs, record_rows, covered_all, query=query, from_=from_, to=to, who=who, kind=kind)
+        chunks_all = [self._chunk_row(assignment, record_rows, cursor_base) for assignment in plan]
 
         LIST_PAGE_CAP = 500
         hit_specs_page = list(hit_specs[offsets["hits"] : offsets["hits"] + hit_cap])
@@ -1004,18 +1207,7 @@ class Index:
         )
         continuation = None
         if more:
-            continuation = _encode_cursor(
-                {
-                    "t": "search",
-                    "rev": self.index_revision,
-                    "query": query,
-                    "from": from_,
-                    "to": to,
-                    "who": who,
-                    "kind": kind,
-                    "off": next_offsets,
-                }
-            )
+            continuation = _encode_cursor({**cursor_base, "off": next_offsets})
         candidate = replace(candidate, continuation=continuation)
         return _with_reply_tokens(candidate)
 
@@ -1057,41 +1249,36 @@ class Index:
 
     # -- chunks -----------------------------------------------------------------
 
-    def _chunk_plan(
-        self,
-        evidence_refs: list[str],
-        record_rows: dict[str, sqlite3.Row],
-        covered_rows: list[CoveredRow],
-        *,
-        query: str,
-        from_: str | None,
-        to: str | None,
-        who: str | None,
-        kind: str | None,
-    ) -> list[ChunkRow]:
-        """#10 ss4: partition once in date/ref order (unknown last, partial
-        dates by period start), greedily filled by calendar-day bucket under
-        ``chunk_tokens``; a bucket over budget splits by ref order; a single
-        record over budget gets its own assignment, marked with how many
-        bounded read segments it will take. Coverage is conservative: only
-        an ``exact`` (day-granularity) record fully inside an eligible
-        digest window is excluded (CONTEXT.md "Coverage")."""
+    def _plan_candidates(
+        self, evidence_refs: list[str], record_rows: dict[str, sqlite3.Row], covered_rows: list[CoveredRow]
+    ) -> list[str]:
+        """The evidence records a plan assigns, in plan order: everything
+        except a source record proven inside an eligible digest window.
+        Membership is conservative (CONTEXT.md "Coverage"): only an
+        ``exact`` (day-granularity) source record is ever excluded; a
+        coarse or unknown date, or any note or manuscript, is never
+        suppressed by overlap alone."""
         windows = [row.window for row in covered_rows]
 
         def is_covered(row: sqlite3.Row) -> bool:
-            if row["confidence"] != "exact":
+            if row["kind"] != "source" or row["confidence"] != "exact":
                 return False
-            return any(row["iso"] >= start and row["iso"] <= end for start, end in windows)
+            return any(start <= row["iso"] <= end for start, end in windows)
 
         candidates = [ref for ref in evidence_refs if not is_covered(record_rows[ref])]
+        candidates.sort(key=lambda ref: _plan_key(record_rows[ref]))
+        return candidates
+
+    def _chunk_plan(
+        self, evidence_refs: list[str], record_rows: dict[str, sqlite3.Row], covered_rows: list[CoveredRow]
+    ) -> list[_Assignment]:
+        """#10 ss4: partition once in plan order, greedily filled by
+        calendar-day bucket under ``chunk_tokens``; a bucket over budget
+        splits by ref order; a single record over budget becomes one
+        assignment per bounded read segment, each marked ``k of n``."""
+        candidates = self._plan_candidates(evidence_refs, record_rows, covered_rows)
         if not candidates:
             return []
-
-        def sort_key(ref: str) -> tuple:
-            row = record_rows[ref]
-            return (row["confidence"] == "unknown", row["iso"], ref)
-
-        candidates.sort(key=sort_key)
 
         buckets: list[tuple[str, list[str]]] = []
         for ref in candidates:
@@ -1102,36 +1289,14 @@ class Index:
             else:
                 buckets.append((key, [ref]))
 
-        assignments: list[ChunkRow] = []
+        assignments: list[_Assignment] = []
         current_refs: list[str] = []
         current_tokens = 0
 
         def flush() -> None:
             nonlocal current_refs, current_tokens
-            if not current_refs:
-                return
-            first_row, last_row = record_rows[current_refs[0]], record_rows[current_refs[-1]]
-            frm = "unknown" if first_row["confidence"] == "unknown" else first_row["iso"]
-            to_ = "unknown" if last_row["confidence"] == "unknown" else last_row["iso"]
-            cursor = _encode_cursor(
-                {
-                    "t": "search",
-                    "rev": self.index_revision,
-                    "query": query,
-                    "from": from_,
-                    "to": to,
-                    "who": who,
-                    "kind": kind,
-                    "off": {"hits": 0, "month": 0, "covered": 0, "chunks": 0},
-                    "scope": list(current_refs),
-                }
-            )
-            segments = 1
-            if len(current_refs) == 1 and record_rows[current_refs[0]]["tokens"] > self.chunk_tokens:
-                segments = math.ceil(record_rows[current_refs[0]]["tokens"] / self.chunk_tokens)
-            assignments.append(
-                ChunkRow(from_=frm, to=to_, records=len(current_refs), tokens=current_tokens, cursor=cursor, segments=segments)
-            )
+            if current_refs:
+                assignments.append(_Assignment(refs=list(current_refs), tokens=current_tokens))
             current_refs = []
             current_tokens = 0
 
@@ -1146,14 +1311,50 @@ class Index:
             # This bucket alone exceeds budget: split by ref order.
             for ref in refs_in_bucket:
                 ref_tokens = record_rows[ref]["tokens"]
+                if ref_tokens > self.chunk_tokens:
+                    flush()
+                    segments = math.ceil(ref_tokens / self.chunk_tokens)
+                    for k in range(1, segments + 1):
+                        assignments.append(self._scoped_assignment([ref], record_rows, (k, segments)))
+                    continue
                 if current_refs and current_tokens + ref_tokens > self.chunk_tokens:
                     flush()
                 current_refs.append(ref)
                 current_tokens += ref_tokens
-                if ref_tokens > self.chunk_tokens:
-                    flush()  # this one record alone is oversized
         flush()
         return assignments
+
+    def _scoped_assignment(
+        self, refs_in_scope: list[str], record_rows: dict[str, sqlite3.Row], segment: tuple[int, int] | None
+    ) -> _Assignment:
+        tokens = sum(record_rows[ref]["tokens"] for ref in refs_in_scope)
+        if segment is not None:
+            k, _n = segment
+            tokens = max(0, min(self.chunk_tokens, tokens - (k - 1) * self.chunk_tokens))
+        return _Assignment(refs=refs_in_scope, tokens=tokens, segment=segment)
+
+    def _chunk_row(self, assignment: _Assignment, record_rows: dict[str, sqlite3.Row], cursor_base: dict) -> ChunkRow:
+        first_row, last_row = record_rows[assignment.refs[0]], record_rows[assignment.refs[-1]]
+        frm = "unknown" if first_row["confidence"] == "unknown" else first_row["iso"]
+        to_ = "unknown" if last_row["confidence"] == "unknown" else last_row["iso"]
+        payload = {
+            **cursor_base,
+            "off": {"hits": 0, "month": 0, "covered": 0, "chunks": 0},
+            "scope": [_plan_key(first_row), _plan_key(last_row)],
+        }
+        if assignment.segment is not None:
+            payload["seg"] = list(assignment.segment)
+        else:
+            payload.pop("seg", None)
+        return ChunkRow(
+            from_=frm,
+            to=to_,
+            records=len(assignment.refs),
+            tokens=assignment.tokens,
+            cursor=_encode_cursor(payload),
+            segment=assignment.segment,
+        )
+
 
     # -- read -------------------------------------------------------------------
 
@@ -1177,73 +1378,84 @@ class Index:
             start_para = start_char = 0
 
         parsed = refs.parse(ref)
-        segments = self._read_segments(parsed)
+        labels, units = self._read_selection(parsed)
 
-        budget_bytes = REPLY_TOKEN_BUDGET * 4 - 400  # headroom for the continuation/reply_tokens lines
-        body, next_off = _paginate(segments, start_para, start_char, budget_bytes)
+        # The whole serialized reply shares the budget: labels first, then
+        # headroom for the continuation and reply_tokens lines.
+        labels_bytes = sum(len(label.encode("utf-8")) + 1 for label in labels)
+        budget_bytes = REPLY_TOKEN_BUDGET * 4 - labels_bytes - 400
+        pieces, next_off = _paginate(units, start_para, start_char, budget_bytes)
         continuation = None
         if next_off is not None:
             continuation = _encode_cursor({"t": "read", "rev": self.index_revision, "ref": ref, "off": next_off})
-        reply = ReadReply(ref=ref, body=body, continuation=continuation)
+        reply = ReadReply(ref=ref, labels=tuple(labels), pieces=tuple(pieces), continuation=continuation)
         return _with_read_reply_tokens(reply)
 
-    def _read_segments(self, parsed: "refs.Ref") -> list[str]:
-        """The ordered list of text units ``_paginate`` walks: one leading
-        heading/metadata segment, then the payload paragraphs."""
+    def _read_selection(self, parsed: "refs.Ref") -> tuple[list[str], list[tuple[str | None, str]]]:
+        """The selection's transport labels (the ref line, then markers) and
+        the ``(label, paragraph)`` units ``_paginate`` walks. Source
+        paragraphs are labelled with their citation so a reader can cite
+        ``p17`` from what it read; notes and manuscript are positional and
+        carry no per-paragraph label."""
         if isinstance(parsed, refs.SourceRef):
-            return self._read_source_segments(parsed)
+            return self._read_source(parsed)
         if isinstance(parsed, refs.ManuscriptRef):
-            return self._read_manuscript_section_segments(parsed)
-        return self._read_path_segments(parsed)
+            return self._read_manuscript_section(parsed)
+        return self._read_path(parsed)
 
-    def _read_source_segments(self, parsed: "refs.SourceRef") -> list[str]:
+    def _read_source(self, parsed: "refs.SourceRef") -> tuple[list[str], list[tuple[str | None, str]]]:
         canonical = refs.render(parsed)
         record_row = self._conn.execute("SELECT * FROM records WHERE ref = ?", (parsed.id,)).fetchone()
+        labels = [self._read_header_line(canonical, record_row)] if record_row is not None else []
+
+        def citation(anchor: int) -> str:
+            return refs.render(refs.SourceRef(parsed.id, anchor=anchor))
+
         if parsed.anchor is None:
             if record_row is None:
                 raise BadRef(f"no such record: {parsed.id}")
-            paragraphs = self._paragraph_texts(parsed.id)
-            header = self._read_header_line(record_row)
-            return [header] + list(paragraphs)
+            rows = self._conn.execute(
+                "SELECT anchor, text FROM paragraphs WHERE ref = ? ORDER BY idx", (parsed.id,)
+            ).fetchall()
+            return labels, [(citation(row["anchor"]), row["text"]) for row in rows]
         if parsed.end is not None or parsed.tail:
             result = self._ledger.range(canonical)
             if isinstance(result, str):
-                return [result]
-            texts = [text for _p, text in result]
-            header = self._read_header_line(record_row) if record_row is not None else parsed.id
-            return [header] + texts
-        # a single paragraph anchor: live or retired, straight from the ledger.
+                return labels + [result], []
+            return labels, [(citation(p), text) for p, text in result]
+        # A single paragraph anchor, live or retired, straight from the ledger.
         text = self._ledger.text(canonical)
-        if parsed.anchor in self._ledger.live_anchors(parsed.id) and record_row is not None:
-            header = self._read_header_line(record_row)
-            return [header, text]
-        return [text]
+        if parsed.anchor in self._ledger.live_anchors(parsed.id):
+            return labels, [(canonical, text)]
+        # Retired: the ledger composes its marker, the exact text and the
+        # pointer as three parts on their own lines (ADR-0001, Ledger.text);
+        # the marker and pointer are labels, only the exact text is payload.
+        marker, _, rest = text.partition("\n")
+        exact_text, _, pointer = rest.rpartition("\n")
+        return labels + [marker, pointer], [(canonical, exact_text)]
 
-    def _read_header_line(self, record_row: sqlite3.Row) -> str:
+    def _read_header_line(self, canonical: str, record_row: sqlite3.Row) -> str:
         date = self._record_date(record_row)
-        return f"{record_row['ref']}  {display_date(date)}  {record_row['kind']}  {record_row['title']}"
+        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {record_row['title']}"
 
     def _paragraph_texts(self, ref: str) -> list[str]:
         rows = self._conn.execute("SELECT text FROM paragraphs WHERE ref = ? ORDER BY idx", (ref,)).fetchall()
         return [row["text"] for row in rows]
 
-    def _read_path_segments(self, parsed: "refs.PathRef") -> list[str]:
+    def _read_path(self, parsed: "refs.PathRef") -> tuple[list[str], list[tuple[str | None, str]]]:
         record_row = self._conn.execute("SELECT * FROM records WHERE ref = ?", (parsed.path,)).fetchone()
         if record_row is None:
             raise BadRef(f"no such record: {parsed.path}")
-        header = self._read_header_line(record_row)
-        segments = [header]
+        labels = [self._read_header_line(parsed.path, record_row)]
         if record_row["kind"] == "note":
-            warnings = json.loads(record_row["warnings_json"])
-            segments += [f"warning: {warning}" for warning in warnings]
-        segments += self._paragraph_texts(parsed.path)
-        return segments
+            labels += [f"warning: {warning}" for warning in json.loads(record_row["warnings_json"])]
+        return labels, [(None, text) for text in self._paragraph_texts(parsed.path)]
 
-    def _read_manuscript_section_segments(self, parsed: "refs.ManuscriptRef") -> list[str]:
+    def _read_manuscript_section(self, parsed: "refs.ManuscriptRef") -> tuple[list[str], list[tuple[str | None, str]]]:
         record_row = self._conn.execute("SELECT * FROM records WHERE ref = ?", (parsed.path,)).fetchone()
         if record_row is None:
             raise BadRef(f"no such record: {parsed.path}")
         paragraphs = tuple(self._paragraph_texts(parsed.path))
         section = _manuscript_section(paragraphs, parsed.heading, parsed.occurrence)
-        header = self._read_header_line(record_row)
-        return [header] + section
+        labels = [self._read_header_line(refs.render(parsed), record_row)]
+        return labels, [(None, text) for text in section]

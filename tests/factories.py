@@ -48,13 +48,17 @@ def make_source(
     *,
     date: Date = None,
     title: str | None = None,
+    converter: str = "text",
+    dated: bool = False,
 ) -> Record:
     """A source Record for raw unit ``path``, ledger-registered and aligned
-    so its paragraphs carry real, durable anchors."""
+    so its paragraphs carry real, durable anchors. ``converter`` and
+    ``dated`` reach :meth:`Ledger.align` so a test can replay a conversion
+    or dating-only change the way the sources adapter reports one."""
     if date is None:
         date = unknown()
     unit_id = ledger.register([path])[path]
-    ledger.align(path, _sha256(paragraphs), paragraphs, converter="text", at=date.iso)
+    ledger.align(path, _sha256(paragraphs), paragraphs, converter=converter, at=date.iso, dated=dated)
     return Record(
         ref=unit_id,
         kind="source",

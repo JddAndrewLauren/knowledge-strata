@@ -157,3 +157,12 @@ def test_a_model_identity_change_reembeds_everything(tmp_path, ledger):
     idx2.sync([r1])
     assert sorted(embedder2.passage_calls) == ["Alpha.", "Beta."]
     idx2.close()
+
+
+def test_indexing_reports_incomplete_with_progress_until_a_sync_completes(index):
+    ledger = index._ledger
+    records = [make_source(ledger, f"r{i}.txt", [f"Text {i}."], date=exact("2001-06-01")) for i in range(3)]
+    index.sync(records[:2], complete=False)
+    assert index.search().indexing == "incomplete (2 records indexed)"
+    index.sync(records)
+    assert index.search().indexing == "complete"
