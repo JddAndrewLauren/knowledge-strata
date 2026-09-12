@@ -15,8 +15,11 @@ the converter's paragraphs; :class:`strata.ledger.Ledger` gives the unit its
 stable id and aligns the new paragraphs to a version. A unit the normalizer
 refuses, or that converts to no text, gets no id and no Record - the raw
 bytes are never worth a durable identity - and is counted in the sync report
-instead. A previously registered path missing from this walk has its unit
-retired: its live anchors keep their exact text, retired.
+instead. A previously registered path that produced no Record on this walk -
+its file gone, or still there but now refused - has its unit retired: its
+live anchors keep their exact text, retired, and the corpus revision
+advances (CONTEXT.md: a membership change). The path keeps its id, so a
+file that later converts again resumes its unit at a new version.
 
 Never opens an attachment and never writes inside a corpus root.
 """
@@ -60,7 +63,9 @@ class Skip:
 @dataclass(frozen=True)
 class SyncReport:
     """One call's outcome: the Records to index, the units that produced
-    none (and why), and the unit ids retired because their file is gone."""
+    none (and why), and the unit ids retired on this call - their file is
+    gone, or it is still there but no longer converts (listed in ``skipped``
+    too) - and so marked deleted in the ledger."""
 
     records: tuple[Record, ...]
     skipped: tuple[Skip, ...]
@@ -76,12 +81,10 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
     at = datetime.now(timezone.utc).isoformat()
 
     skipped: list[Skip] = []
-    pending: list[tuple[str, bytes, str, str, tuple[str, ...], str]] = []
-    seen: set[str] = set()
+    pending: list[tuple[str, str, bytes, str, str, tuple[str, ...], str]] = []
 
     with _ConversionCache(cache_db) as cache:
         for key, relative, path in units:
-            seen.add(key)
             converter = _CONVERTER_NAMES.get(path.suffix.lower())
             if converter is None:
                 skipped.append(Skip(relative, f"no converter claims the suffix {path.suffix.lower()!r}"))
@@ -117,9 +120,10 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
         ref = refs.render(refs.SourceRef(ids[key]))
         records.append(Record(ref=ref, kind="source", date=when, title=title, paragraphs=tuple(paragraphs)))
 
+    live = {key for key, *_ in pending}
     deleted = []
     for path, (unit_id, is_deleted) in ledger.known_units().items():
-        if path not in seen and not is_deleted:
+        if path not in live and not is_deleted:
             ledger.retire_unit(path, at=at)
             deleted.append(unit_id)
 

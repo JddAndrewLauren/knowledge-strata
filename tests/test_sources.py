@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from strata.corpus import sources
-from strata.ledger import Ledger
+from strata.ledger import AlignResult, Ledger
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ROOT / "examples" / "west-desk" / "sources"
@@ -55,6 +55,13 @@ def test_walking_west_desk_yields_one_record_per_convertible_file_with_a_correct
     assert ids == list(range(1, len(report.records) + 1))
     assert not report.deleted
 
+    # Assigned in sorted path order: the n-th path is SRC-00000n.
+    units_by_path = sorted(ledger.known_units().items())
+    assert len(units_by_path) == len(report.records)
+    assert [unit_id for _, (unit_id, _) in units_by_path] == [
+        f"SRC-{n:06d}" for n in range(1, len(units_by_path) + 1)
+    ]
+
 
 # -- acceptance #30 test 2: an unchanged walk converts nothing -------------
 
@@ -62,18 +69,38 @@ def test_walking_west_desk_yields_one_record_per_convertible_file_with_a_correct
 def test_a_second_unchanged_walk_converts_nothing_and_matches_the_first(tmp_path, monkeypatch):
     ledger = Ledger(tmp_path / "ledger.db")
     cache_db = tmp_path / "store.db"
+
+    aligned: list[list[AlignResult]] = []  # one list of align outcomes per walk
+    real_align = ledger.align
+
+    def spying_align(*args, **kwargs):
+        result = real_align(*args, **kwargs)
+        aligned[-1].append(result)
+        return result
+
+    monkeypatch.setattr(ledger, "align", spying_align)
+
+    aligned.append([])
     first = sources.sync([SOURCES], ledger, cache_db=cache_db)
+    revision = ledger.corpus_revision()
 
     def boom(*args, **kwargs):
         raise AssertionError("normalizer.normalize() must not run on a cache hit")
 
     monkeypatch.setattr(sources.normalizer, "normalize", boom)
+    aligned.append([])
     second = sources.sync([SOURCES], ledger, cache_db=cache_db)
 
     key = lambda records: {r.ref: (r.title, r.paragraphs, r.date) for r in records}  # noqa: E731
     assert key(second.records) == key(first.records)
     assert {s.path for s in second.skipped} == {s.path for s in first.skipped}
     assert not second.deleted
+
+    # Identical versions: every unit's align was a no-op at the same version.
+    versions = lambda results: {r.id: r.version for r in results}  # noqa: E731
+    assert versions(aligned[1]) == versions(aligned[0])
+    assert all(not r.changed for r in aligned[1])
+    assert ledger.corpus_revision() == revision
 
 
 # -- acceptance #30 test 3: edit versions one unit; delete retires; --------
@@ -130,6 +157,49 @@ def test_editing_deleting_and_adding_files_touch_only_whats_affected(tmp_path):
     highest_before = max(int(unit_id.removeprefix("SRC-")) for unit_id, _ in units_before.values())
     assert int(new_id.removeprefix("SRC-")) > highest_before
     assert any(r.ref == new_id for r in fourth.records)
+
+
+# -- review round 1: a unit that stops converting leaves the index --------
+# -- as a membership change, not silently ----------------------------------
+
+
+def test_a_unit_that_stops_converting_retires_with_exact_text_and_advances_the_revision(tmp_path):
+    corpus = tmp_path / "sources"
+    shutil.copytree(SOURCES, corpus)
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+
+    sources.sync([corpus], ledger, cache_db=cache_db)
+    glossary_key = "000/memos/glossary.txt"
+    glossary_id, _ = ledger.known_units()[glossary_key]
+    revision = ledger.corpus_revision()
+
+    # The file is still there, but now the normalizer refuses it.
+    (corpus / "memos" / "glossary.txt").write_bytes(b"\x00\x01\x02 not text any more \x00")
+    second = sources.sync([corpus], ledger, cache_db=cache_db)
+
+    assert "memos/glossary.txt" in {skip.path for skip in second.skipped}
+    assert glossary_id not in {r.ref for r in second.records}
+    assert glossary_id in second.deleted
+    assert ledger.known_units()[glossary_key] == (glossary_id, True)
+    retired_text = ledger.text(f"{glossary_id} p1")
+    assert "retired" in retired_text
+    assert "Desk glossary" in retired_text
+    assert ledger.corpus_revision() != revision
+
+    # A third walk with the file still refused retires nothing again.
+    revision = ledger.corpus_revision()
+    third = sources.sync([corpus], ledger, cache_db=cache_db)
+    assert not third.deleted
+    assert ledger.corpus_revision() == revision
+    assert {r.ref for r in third.records} == {r.ref for r in second.records}
+
+    # Converting again resumes the same unit at a new version, not a new id.
+    (corpus / "memos" / "glossary.txt").write_text("Desk glossary\n\nRestored.\n", encoding="utf-8")
+    fourth = sources.sync([corpus], ledger, cache_db=cache_db)
+    assert glossary_id in {r.ref for r in fourth.records}
+    assert ledger.known_units()[glossary_key] == (glossary_id, False)
+    assert not fourth.deleted
 
 
 # -- acceptance #30 test 4: deleting the user cache reconverts but replays -
