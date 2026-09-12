@@ -5,6 +5,7 @@ Every scenario is hermetic: a temporary sqlite file, paragraph lists written
 inline or borrowed from ``scripts/make_fixtures.py``. No network, no corpus.
 """
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -103,26 +104,54 @@ def test_reading_a_missing_or_whole_record_ref_is_refused(ledger):
         ledger.text("SRC-000001 p99")
 
 
-def test_retired_anchor_still_readable_after_the_unit_is_deleted_and_a_further_version(ledger):
-    """Readback survives cache deletion and raw-file changes or removal in
-    spirit: the ledger persists retired text with no dependency on the raw
-    file or a cache, so later ledger activity cannot lose it."""
+def test_retired_anchor_reads_back_after_cache_removal_raw_change_and_raw_removal(tmp_path):
+    """Acceptance #22 test 6: the marker, the exact original text and the
+    bare-record pointer survive a further change to the same raw file, an
+    ``rm -rf .strata/cache/`` beside the ledger, and the raw file's removal."""
+    strata_dir = tmp_path / ".strata"
+    cache = strata_dir / "cache"
+    cache.mkdir(parents=True)
+    (cache / "SRC-000001.txt").write_text("derived, disposable", encoding="utf-8")
+    ledger = Ledger(strata_dir / "ledger.db")
+
     ledger.register(["sources/x.txt"])
     ledger.align("sources/x.txt", "h1", ["kept", "gone"], converter="text", at="d1")
     ledger.align("sources/x.txt", "h2", ["kept"], converter="text", at="d2")  # "gone" retires
-    retired = ledger.text("SRC-000001 p2")
-    assert "gone" in retired
+    expected = (
+        "SRC-000001 p2 - retired at v2 (d2); the v1 text it cited:\n"
+        "gone\n"
+        "The record's current text is SRC-000001."
+    )
+    assert ledger.text("SRC-000001 p2") == expected
 
-    ledger.register(["sources/y.txt"])
-    ledger.align("sources/y.txt", "h3", ["unrelated"], converter="text", at="d3")
-    ledger.retire_unit("sources/x.txt", at="d4")  # the raw file is removed entirely
+    # (a) The same raw file changes again: a new version, the old marker unchanged.
+    further = ledger.align("sources/x.txt", "h3", ["kept", "replacement"], converter="text", at="d3")
+    assert further.version == 3
+    assert ledger.text("SRC-000001 p2") == expected
 
-    still_retired = ledger.text("SRC-000001 p2")
-    assert "gone" in still_retired
-    # The other, never-changed anchor is retired too, by the deletion.
-    now_retired = ledger.text("SRC-000001 p1")
-    assert "retired at v3" in now_retired
-    assert "kept" in now_retired
+    # (b) The cache is deleted outright and the ledger reopened from its file.
+    ledger.close()
+    shutil.rmtree(cache)
+    assert not cache.exists()
+    ledger = Ledger(strata_dir / "ledger.db")
+    try:
+        assert ledger.text("SRC-000001 p2") == expected
+
+        # (c) The raw file is removed entirely: everything live retires, p2 is untouched.
+        ledger.retire_unit("sources/x.txt", at="d4")
+        assert ledger.text("SRC-000001 p2") == expected
+        assert ledger.text("SRC-000001 p1") == (
+            "SRC-000001 p1 - retired at v4 (d4); the v1 text it cited:\n"
+            "kept\n"
+            "The record's current text is SRC-000001."
+        )
+        assert ledger.text("SRC-000001 p3") == (
+            "SRC-000001 p3 - retired at v4 (d4); the v3 text it cited:\n"
+            "replacement\n"
+            "The record's current text is SRC-000001."
+        )
+    finally:
+        ledger.close()
 
 
 # -- atomicity: acceptance #22 test 3 ---------------------------------------
@@ -229,17 +258,22 @@ def test_corpus_revision_advances_on_content_deletion_converter_and_dating_chang
     after_new_unit = ledger.corpus_revision()
     assert after_new_unit != start
 
-    unchanged = ledger.align("a.txt", "h1", ["x"], converter="text", at="d1")
+    edited = ledger.align("a.txt", "h2", ["y"], converter="text", at="d1")
+    assert edited.changed
+    after_content = ledger.corpus_revision()
+    assert after_content != after_new_unit  # the unit's content changed
+
+    unchanged = ledger.align("a.txt", "h2", ["y"], converter="text", at="d1")
     assert not unchanged.changed
     after_unchanged = ledger.corpus_revision()
-    assert after_unchanged == after_new_unit  # a cache-only rebuild: no content change
+    assert after_unchanged == after_content  # a cache-only rebuild: no content change
 
-    dated = ledger.align("a.txt", "h1", ["x"], converter="text", at="d1", dated=True)
+    dated = ledger.align("a.txt", "h2", ["y"], converter="text", at="d1", dated=True)
     assert dated.changed
     after_dated = ledger.corpus_revision()
     assert after_dated != after_unchanged  # dating changed even though content did not
 
-    converted = ledger.align("a.txt", "h1", ["x"], converter="text-v2", at="d2")
+    converted = ledger.align("a.txt", "h2", ["y"], converter="text-v2", at="d2")
     assert converted.changed
     after_converter = ledger.corpus_revision()
     assert after_converter != after_dated

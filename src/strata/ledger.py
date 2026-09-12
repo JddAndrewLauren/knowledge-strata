@@ -389,7 +389,7 @@ class Ledger:
             )
         result = []
         for p in order[start : end_pos + 1]:
-            anchor_id, text = self._live_anchor(unit_id, p)
+            _, text = self._live_anchor(unit_id, p)
             result.append((p, text))
         return result
 
