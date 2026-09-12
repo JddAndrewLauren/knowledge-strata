@@ -144,6 +144,12 @@ def test_first_sentence_takes_the_first_sentence_of_the_first_non_empty_paragrap
     ("Fig. 3 shows it", "Fig."),
     ("Version 2.1 shipped. Then 2.2.", "Version 2.1 shipped."),
     ("  spaced\tout\n text.  ", "spaced out text."),
+    ('He said "no." Then he left.', 'He said "no."'),
+    ("It failed (badly). Again.", "It failed (badly)."),
+    ("She asked 'why?' twice.", "She asked 'why?'"),
+    ("\u201cStop.\u201d He did.", "\u201cStop.\u201d"),
+    ("Wait... then go.", "Wait..."),
+    ('A "quoted" word. Then.', 'A "quoted" word.'),
 ])
 def test_first_sentence_stops_at_the_first_terminator_followed_by_space_or_end(text, expected):
     assert first_sentence((text,)) == expected

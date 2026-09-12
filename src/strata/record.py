@@ -114,6 +114,8 @@ class Record:
             for field in ("corpus_revision", "coverage_complete"):
                 if getattr(self, field) is not None:
                     raise ValueError(f"{field} is a digest field; this note's type is {self.type!r}")
+        # coverage_complete without corpus_revision is accepted here: it is the
+        # notes adapter's warning (#29), and such a digest simply earns no credit.
         if self.corpus_revision is not None and not self.corpus_revision:
             raise ValueError("corpus_revision is set but empty")
         if self.coverage_complete is not None and not isinstance(self.coverage_complete, bool):
@@ -152,14 +154,16 @@ class Record:
             raise ValueError(f"window from must not follow to: {self.window!r}")
 
 
-_SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
+# A terminator, then any closing quotes or brackets, then a space or the end.
+_SENTENCE_END = re.compile(r"""[.!?]["')\]\u2019\u201d]*(?=\s|$)""")
 
 
 def first_sentence(paragraphs, cap: int = 120) -> str:
     """The extractive title of last resort, the same for every kind.
 
-    The first sentence of the first non-empty paragraph, cut at ``cap``
-    characters on a word boundary. Empty only when no paragraph has text.
+    The first sentence of the first non-empty paragraph (a closing quote or
+    bracket after the full stop stays with it), cut at ``cap`` characters on
+    a word boundary. Empty only when no paragraph has text.
     """
     for paragraph in paragraphs:
         text = " ".join(paragraph.split())

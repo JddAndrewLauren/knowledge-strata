@@ -24,6 +24,8 @@ ACCEPTED = [
     ("heading-tight", "manuscript/ch24.md#The Letter", ManuscriptRef("manuscript/ch24.md", "The Letter"), "manuscript/ch24.md # The Letter"),
     ("heading-occurrence", "manuscript/ch24.md # The Letter (2)", ManuscriptRef("manuscript/ch24.md", "The Letter", 2), "manuscript/ch24.md # The Letter (2)"),
     ("heading-first-occurrence", "manuscript/ch24.md # The Letter (1)", ManuscriptRef("manuscript/ch24.md", "The Letter"), "manuscript/ch24.md # The Letter"),
+    ("heading-markers-dropped", "manuscript/ch24.md ## The Letter", ManuscriptRef("manuscript/ch24.md", "The Letter"), "manuscript/ch24.md # The Letter"),
+    ("heading-markers-spaced", "manuscript/ch24.md # # The Letter (2)", ManuscriptRef("manuscript/ch24.md", "The Letter", 2), "manuscript/ch24.md # The Letter (2)"),
     ("heading-as-written", "manuscript/ch02.md # Morning, again: the cut-off?", ManuscriptRef("manuscript/ch02.md", "Morning, again: the cut-off?"), "manuscript/ch02.md # Morning, again: the cut-off?"),
     ("note", "notes/person/dave.md", PathRef("notes/person/dave.md"), "notes/person/dave.md"),
     ("project-note", "notes/project.md", PathRef("notes/project.md"), "notes/project.md"),
@@ -62,6 +64,7 @@ REJECTED = [
     ("empty", "", "empty"),
     ("blank", "   ", "empty"),
     ("empty-heading", "notes/x.md #", "empty heading"),
+    ("only-markers", "notes/x.md ###", "empty heading"),
     ("zero-occurrence", "manuscript/ch24.md # The Letter (0)", "(0)"),
     ("only-occurrence", "manuscript/ch24.md # (2)", "(2)"),
 ]
@@ -128,6 +131,23 @@ def test_a_range_needs_a_start_and_is_closed_or_open_not_both():
         SourceRef("SRC-000184", tail=True)
     with pytest.raises(BadRef):
         SourceRef("SRC-000184", 17, end=22, tail=True)
+
+
+@pytest.mark.parametrize("build", [
+    lambda: ManuscriptRef("manuscript/ch24.md", ""),
+    lambda: ManuscriptRef("manuscript/ch24.md", "  "),
+    lambda: ManuscriptRef("manuscript/ch24.md", "The Letter", 0),
+    lambda: ManuscriptRef("../ch24.md", "The Letter"),
+    lambda: ManuscriptRef("/ms/ch24.md", "The Letter"),
+    lambda: PathRef("../x.md"),
+    lambda: PathRef("C:/x.md"),
+    lambda: PathRef("notes\\x.md"),
+    lambda: PathRef(""),
+], ids=["empty-heading", "blank-heading", "zero-occurrence", "dot-dot-path", "absolute-path", "path-dot-dot", "path-drive", "path-backslash", "path-empty"])
+def test_direct_construction_obeys_the_same_rules_as_parse(build):
+    """A ref built by an adapter renders to text parse would accept."""
+    with pytest.raises(BadRef):
+        build()
 
 
 def test_range_order_is_not_this_modules_question():

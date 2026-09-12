@@ -51,14 +51,22 @@ class SourceRef:
 class ManuscriptRef:
     """``manuscript/ch24.md # The Letter``: a heading section of a live file.
 
-    Positional, never durable. ``heading`` is the text as written;
-    ``occurrence`` is the ``(2)`` suffix for a repeated heading, 1 when none.
-    There is no paragraph part, ever.
+    Positional, never durable. ``heading`` is the text as written, without
+    the markdown ``#`` markers (depth is not part of a ref); ``occurrence``
+    is the ``(2)`` suffix for a repeated heading, 1 when none. There is no
+    paragraph part, ever.
     """
 
     path: str
     heading: str
     occurrence: int = 1
+
+    def __post_init__(self):
+        _repository_path(self.path)
+        if not self.heading.strip():
+            raise BadRef(f"empty heading after {self.path!r} #")
+        if self.occurrence < 1:
+            raise BadRef(f"heading occurrence must be 1 or more: {self.occurrence!r}")
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,9 @@ class PathRef:
     """A bare project-relative path: a note, or a manuscript file whole."""
 
     path: str
+
+    def __post_init__(self):
+        _repository_path(self.path)
 
 
 Ref = SourceRef | ManuscriptRef | PathRef
@@ -157,9 +168,12 @@ def _source(id: str, rest: str) -> SourceRef:
 
 def _manuscript(path: str, heading: str) -> ManuscriptRef:
     path = _repository_path(path.strip())
-    heading = heading.strip()
-    if not heading:
+    # `## The Letter` copied from the file means the same heading: depth is
+    # not part of a ref, the adapter matches heading text.
+    heading = heading.lstrip("# \t")
+    if not heading.strip():
         raise BadRef(f"empty heading after {path!r} #")
+    heading = heading.strip()
     occurrence = 1
     match = _OCCURRENCE.search(heading)
     if match:
