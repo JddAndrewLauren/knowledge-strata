@@ -107,7 +107,7 @@ def normalize(raw_bytes: bytes, path: str) -> Result:
 # --- plain text and markdown ------------------------------------------------
 
 
-def _decode_text(raw_bytes: bytes) -> str:
+def decode_text(raw_bytes: bytes) -> str:
     """UTF-8, or cp1252 when the bytes are not UTF-8. Never raises: a unit
     that is not really text at all is a job for the guard below, not an
     exception."""
@@ -145,7 +145,7 @@ def split_paragraphs(text: str) -> list[str]:
 
 
 def _convert_text(raw_bytes: bytes) -> Result:
-    text = _decode_text(raw_bytes)
+    text = decode_text(raw_bytes)
     paragraphs = split_paragraphs(text)
     refusal = _guard(text, paragraphs)
     if refusal:

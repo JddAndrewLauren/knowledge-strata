@@ -5,14 +5,17 @@ Reads every note as it is. ``type`` is the folder name directly under
 ``notes/`` (``None`` for a top-level file such as ``project.md``). This is
 the only code that parses the frontmatter contract - ``aliases``, ``window``,
 ``corpus_revision``, ``coverage_complete``, all optional. A note that fails
-validation is indexed with a warning, not dropped, with the offending field
-cleared; ``coverage_complete`` without ``corpus_revision`` is accepted by
-``Record`` itself but earns no coverage, so it is this adapter's warning to
-raise (record.py). ``project.md`` is also warned about past 2,000 words of
-body text, frontmatter excluded (issue #29). Title is the H1, else the
-filename stem; date is always unknown, since notes run no dating strategy.
-The body is split into paragraphs like plain text; frontmatter is not a
-paragraph.
+validation is indexed with a warning, not dropped, with only the offending
+field cleared - so every rule ``Record`` enforces on a note is checked here
+first, field by field, and ``Record`` never gets to reject a note whole.
+``coverage_complete`` without ``corpus_revision`` is accepted by ``Record``
+itself but earns no coverage, so it is this adapter's warning to raise
+(record.py). ``project.md`` is also warned about past 2,000 words of body
+text, frontmatter excluded (issue #29). Title is the H1, else the filename
+stem; date is always unknown, since notes run no dating strategy. The body
+is split into paragraphs like plain text; frontmatter is not a paragraph.
+Bytes decode the way the normalizer decodes plain text (UTF-8, then cp1252),
+so one cp1252 note never aborts the walk.
 """
 
 from __future__ import annotations
@@ -25,13 +28,13 @@ from pathlib import Path
 import yaml
 
 from strata import dating, refs
-from strata.normalizer import split_paragraphs
+from strata.normalizer import decode_text, split_paragraphs
 from strata.record import Record
 
 _FRONTMATTER = re.compile(r"\A---\r?\n(?P<yaml>.*?)\r?\n---\r?\n?", re.DOTALL)
 _H1 = re.compile(r"^#[ \t]+(\S.*)$")
-_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _FIELDS = ("aliases", "window", "corpus_revision", "coverage_complete")
+_DIGEST_FIELDS = ("corpus_revision", "coverage_complete")
 _WORD_CAP = 2000
 
 
@@ -48,13 +51,18 @@ def _read_one(folder: Path, path: Path) -> Record:
     ref = refs.render(refs.PathRef("notes/" + relative.as_posix()))
     note_type = relative.parts[0] if len(relative.parts) > 1 else None
 
-    text = path.read_text(encoding="utf-8")
-    data, body = _split_frontmatter(text)
-
+    text = decode_text(path.read_bytes())
     warnings: list[str] = []
+    data, body = _split_frontmatter(text, ref, warnings)
+
     for key in data:
         if key not in _FIELDS:
             warnings.append(f"{ref}: unknown frontmatter field {key!r}; ignored")
+    if note_type != "digest":
+        for field in _DIGEST_FIELDS:
+            if field in data:
+                warnings.append(f"{ref}: {field} is a digest field; this note's type is {note_type!r}; cleared")
+                data = {key: value for key, value in data.items() if key != field}
     aliases = _valid_aliases(data, ref, warnings)
     window = _valid_window(data, ref, warnings)
     corpus_revision = _valid_corpus_revision(data, ref, warnings)
@@ -72,21 +80,14 @@ def _read_one(folder: Path, path: Path) -> Record:
     title = _title(paragraphs, path)
     note_date = dating.date(dating.RawUnit(path=ref, kind="note"))
 
-    try:
-        return Record(
-            ref=ref, kind="note", date=note_date, title=title, paragraphs=paragraphs, type=note_type,
-            aliases=aliases, window=window, corpus_revision=corpus_revision,
-            coverage_complete=coverage_complete, warnings=tuple(warnings),
-        )
-    except ValueError as error:
-        # A field combination this adapter's own checks did not anticipate
-        # (e.g. a digest-only field on some other type): still never dropped.
-        warnings.append(f"{ref}: frontmatter rejected ({error}); cleared")
-        return Record(ref=ref, kind="note", date=note_date, title=title, paragraphs=paragraphs,
-                       type=note_type, warnings=tuple(warnings))
+    return Record(
+        ref=ref, kind="note", date=note_date, title=title, paragraphs=paragraphs, type=note_type,
+        aliases=aliases, window=window, corpus_revision=corpus_revision,
+        coverage_complete=coverage_complete, warnings=tuple(warnings),
+    )
 
 
-def _split_frontmatter(text: str) -> tuple[dict, str]:
+def _split_frontmatter(text: str, ref: str, warnings: list[str]) -> tuple[dict, str]:
     match = _FRONTMATTER.match(text)
     if not match:
         return {}, text
@@ -94,8 +95,12 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     try:
         data = yaml.safe_load(match.group("yaml"))
     except (yaml.YAMLError, ValueError):
+        warnings.append(f"{ref}: frontmatter is not valid YAML; ignored")
         return {}, body
-    return data if isinstance(data, dict) else {}, body
+    if not isinstance(data, dict):
+        warnings.append(f"{ref}: frontmatter is not a mapping of fields; ignored")
+        return {}, body
+    return data, body
 
 
 def _title(paragraphs: tuple[str, ...], path: Path) -> str:
@@ -129,10 +134,15 @@ def _valid_window(data: dict, ref: str, warnings: list[str]) -> tuple[str, str] 
 
 
 def _as_iso_day(value: object) -> str | None:
+    """A real calendar day as ``YYYY-MM-DD``: YAML already parsed a bare
+    ``2001-06-30`` into a date; a quoted one must parse the same way."""
     if isinstance(value, _date) and not isinstance(value, _datetime):
         return value.isoformat()
-    if isinstance(value, str) and _ISO_DAY.fullmatch(value):
-        return value
+    if isinstance(value, str) and len(value) == 10:
+        try:
+            return _date.fromisoformat(value).isoformat()
+        except ValueError:
+            return None
     return None
 
 

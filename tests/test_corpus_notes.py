@@ -64,15 +64,23 @@ def test_west_desk_aliases_are_as_listed():
     assert by_ref["notes/history/2001-spring.md"].aliases == ()
 
 
-def test_west_desk_window_is_on_all_five_digests():
+def test_west_desk_window_is_on_every_complete_digest():
+    # The July digest is split 1 of 2 and interrupted; #17 wrote it without
+    # frontmatter, as docs/drafts/agents/strata-reader.md has a split or
+    # interrupted assignment omit `window`. Whether it should carry one anyway
+    # (checkbox 1 of #29 says "all five") is an open question on #29; this
+    # test follows the fixture as written until that is decided.
     by_ref = _by_ref(read(NOTES))
     windows = {
         ref: record.window for ref, record in by_ref.items() if record.type == "digest"
     }
-    assert len(windows) == 5
-    assert all(window is not None for window in windows.values())
-    assert windows["notes/digest/2001-04-01--2001-04-30.md"] == ("2001-04-01", "2001-04-30")
-    assert windows["notes/digest/2001-07-01--2001-07-16.md"] == ("2001-07-01", "2001-07-16")
+    assert windows == {
+        "notes/digest/2001-04-01--2001-04-30.md": ("2001-04-01", "2001-04-30"),
+        "notes/digest/2001-05-01--2001-05-31.md": ("2001-05-01", "2001-05-31"),
+        "notes/digest/2001-05-01--2001-05-31-2.md": ("2001-05-01", "2001-05-31"),
+        "notes/digest/2001-06-01--2001-06-30.md": ("2001-06-01", "2001-06-30"),
+        "notes/digest/2001-07-01--2001-07-16.md": None,
+    }
 
 
 def test_west_desk_corpus_revision_and_coverage_only_on_the_three_eligible_digests():
@@ -168,6 +176,69 @@ def test_an_invalid_field_does_not_disturb_a_valid_sibling_field(tmp_path):
     assert record.aliases == ()
     assert record.window == ("2001-06-01", "2001-06-30")
     assert record.warnings == ("notes/person/dave.md: aliases is not a list; cleared",)
+
+
+def test_a_digest_only_field_on_another_type_is_cleared_alone(tmp_path):
+    folder = _write(
+        tmp_path, "person/dave.md",
+        "---\naliases: [Dave, DV]\ncorpus_revision: rev-1\n---\n# Dave\n\nBody.\n",
+    )
+    record = _by_ref(read(folder))["notes/person/dave.md"]
+    assert record.aliases == ("Dave", "DV")
+    assert record.corpus_revision is None
+    assert record.warnings == (
+        "notes/person/dave.md: corpus_revision is a digest field; this note's type is 'person'; cleared",
+    )
+
+
+def test_coverage_complete_on_a_top_level_note_is_cleared_alone(tmp_path):
+    folder = _write(tmp_path, "project.md", "---\ncoverage_complete: true\n---\n# west-desk\n\nBody.\n")
+    record = _by_ref(read(folder))["notes/project.md"]
+    assert record.coverage_complete is None
+    assert record.warnings == (
+        "notes/project.md: coverage_complete is a digest field; this note's type is None; cleared",
+    )
+
+
+def test_an_impossible_calendar_day_in_the_window_is_cleared_alone(tmp_path):
+    folder = _write(
+        tmp_path, "digest/bad.md",
+        "---\nwindow:\n  from: '2001-13-45'\n  to: '2001-13-46'\naliases: [X]\n---\n# Digest\n\nBody.\n",
+    )
+    record = _by_ref(read(folder))["notes/digest/bad.md"]
+    assert record.window is None
+    assert record.aliases == ("X",)
+    assert record.warnings == ("notes/digest/bad.md: window is not a valid from/to pair; cleared",)
+
+
+def test_malformed_yaml_frontmatter_warns_and_keeps_the_body(tmp_path):
+    folder = _write(tmp_path, "person/dave.md", "---\naliases: [unclosed\n---\n# Dave\n\nBody text.\n")
+    record = _by_ref(read(folder))["notes/person/dave.md"]
+    assert record.title == "Dave"
+    assert record.paragraphs == ("# Dave", "Body text.")
+    assert record.aliases == ()
+    assert record.warnings == ("notes/person/dave.md: frontmatter is not valid YAML; ignored",)
+
+
+def test_frontmatter_that_is_not_a_mapping_warns_and_keeps_the_body(tmp_path):
+    folder = _write(tmp_path, "person/dave.md", "---\n- Dave\n- DV\n---\n# Dave\n\nBody text.\n")
+    record = _by_ref(read(folder))["notes/person/dave.md"]
+    assert record.paragraphs == ("# Dave", "Body text.")
+    assert record.warnings == ("notes/person/dave.md: frontmatter is not a mapping of fields; ignored",)
+
+
+# --- encoding: a cp1252 note is indexed, never an abort ---------------------
+
+
+def test_a_cp1252_note_is_indexed_and_does_not_abort_the_walk(tmp_path):
+    folder = _write(tmp_path, "person/anna.md", "# Anna\n\nPlain sibling.\n")
+    (folder / "person" / "rene.md").write_bytes(b"# Ren\xe9\n\nCaf\xe9 note.\n")
+    by_ref = _by_ref(read(folder))
+    assert set(by_ref) == {"notes/person/anna.md", "notes/person/rene.md"}
+    rene = by_ref["notes/person/rene.md"]
+    assert rene.title == "Ren\u00e9"
+    assert rene.paragraphs == ("# Ren\u00e9", "Caf\u00e9 note.")
+    assert rene.warnings == ()
 
 
 # --- the 2,000-word cap on project.md only ---------------------------------
