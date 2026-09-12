@@ -10,20 +10,26 @@ mtime is never a source. No ``dateutil`` fuzzy mode, no ``dateparser``
 (wayfinder #8's resolution).
 
 Converters do not touch date fields, so this module opens email, docx and
-pdf bytes itself rather than trusting a normalizer's parse - the parsing and
-the "text beats metadata" rule live in the one seam. Sources run the whole
-chain; manuscript chapters run the first-line and path rungs only; notes are
-never dated.
+pdf bytes itself for headers and metadata rather than trusting a
+normalizer's parse - the parsing and the "text beats metadata" rule live in
+the one seam. The unit's words arrive either as the raw bytes of a text
+file or as the converter's paragraphs (docx and pdf body text is the
+normalizer's to extract, never this module's). Sources run the whole chain;
+manuscript chapters run the first-line and path rungs only; notes are never
+dated.
 """
 
 from __future__ import annotations
 
 import email
+import email.message
 import email.utils
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import date as _date
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import PurePosixPath
 from xml.etree import ElementTree
@@ -40,13 +46,16 @@ UNKNOWN = Date("", "unknown", "day", "")
 @dataclass(frozen=True)
 class RawUnit:
     """What the dating module reads: the corpus-relative path, the kind
-    (decides which strategies run), and the raw bytes. The module opens
-    email, docx and pdf bytes itself rather than the normalizer reopening
-    them a second time or handing over a partial parse."""
+    (decides which strategies run), the raw bytes, and optionally the
+    converter's paragraphs. Headers and metadata are read from the bytes
+    here (nobody hands over a partial parse); the first-line rung reads the
+    paragraphs when they are given, which is the only way a docx or pdf's
+    own words reach it, and the raw bytes of a text file otherwise."""
 
     path: str
     kind: Kind
     content: bytes = b""
+    paragraphs: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -78,17 +87,17 @@ def _email_headers(raw: RawUnit) -> Date | None:
     if not raw.path.lower().endswith(".eml"):
         return None
     message = email.message_from_bytes(raw.content)
-    header = message.get("Date")
-    if header is not None:
-        parsed = _parse_rfc5322(header)
+    dates = _headers(message, "date")
+    if dates:
+        parsed = _parse_rfc5322(dates[0])
         if parsed is not None:
-            return Date(parsed.date().isoformat(), "exact", "day", header.strip())
+            return Date(parsed.date().isoformat(), "exact", "day", dates[0].strip())
     earliest = None
-    for received in message.get_all("Received") or ():
-        _, _, tail = received.rpartition(";")
-        candidate = tail.strip() or received.strip()
+    for text in _headers(message, "received"):
+        _, _, tail = text.rpartition(";")
+        candidate = tail.strip() or text.strip()
         parsed = _parse_rfc5322(candidate)
-        if parsed is not None and (earliest is None or parsed < earliest[0]):
+        if parsed is not None and (earliest is None or _instant(parsed) < _instant(earliest[0])):
             earliest = (parsed, candidate)
     if earliest is not None:
         parsed, candidate = earliest
@@ -96,11 +105,33 @@ def _email_headers(raw: RawUnit) -> Date | None:
     return None
 
 
-def _parse_rfc5322(text: str):
+def _headers(message: email.message.Message, name: str) -> list[str]:
+    """Every value of one header, in order, as real text. ``get()`` hands a
+    header carrying raw 8-bit bytes back as an ``email.header.Header`` with
+    the bytes already replaced (the corpus is ISO-8859-1 email), so the raw
+    pairs are read instead: their surrogate escapes are the bytes, put back
+    and decoded so the verbatim wording is an encodable string."""
+    return [
+        _decode(value.encode("utf-8", "surrogateescape"))
+        for key, value in message.raw_items()
+        if key.lower() == name
+    ]
+
+
+def _parse_rfc5322(text: str) -> datetime | None:
     try:
         return email.utils.parsedate_to_datetime(text)
     except (TypeError, ValueError):
         return None
+
+
+def _instant(parsed: datetime) -> datetime:
+    """One comparable key for ``Received`` timestamps: ``-0000`` and a
+    missing zone parse naive, everything else aware, and the two cannot be
+    compared directly. Naive is read as UTC, which is what ``-0000`` means."""
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 # --------------------------------------------------------------------------
@@ -218,9 +249,15 @@ _CANDIDATE_CAP = 45
 
 
 def _first_line(raw: RawUnit) -> Date | None:
-    if raw.path.lower().endswith((".eml", ".docx", ".pdf")):
-        return None  # this module does not extract body text from those
-    text = _decode(raw.content)
+    suffix = PurePosixPath(raw.path).suffix.lower()
+    if suffix == ".eml":
+        return None  # transport headers are email's one seam: no repair of a human-format Date
+    if raw.paragraphs:
+        text = "\n".join(raw.paragraphs)
+    elif suffix in (".docx", ".pdf"):
+        return None  # their words reach this rung only as the converter's paragraphs
+    else:
+        text = _decode(raw.content)
     non_empty = [line for line in text.splitlines() if line.strip()]
     if not non_empty:
         return None
@@ -372,6 +409,7 @@ _PDF_CREATOR = re.compile(rb"/Creator\s*\((?P<value>[^)]*)\)")
 _PDF_PRODUCER = re.compile(rb"/Producer\s*\((?P<value>[^)]*)\)")
 _PDF_XMP_CREATE = re.compile(rb"<xmp:CreateDate>(?P<date>[^<]*)</xmp:CreateDate>")
 _PDF_TEXT_OPERATOR = re.compile(rb"\bTj\b|\bTJ\b")
+_PDF_STREAM = re.compile(rb"\bstream\r?\n(?P<body>.*?)\r?\nendstream", re.DOTALL)
 
 
 def _pdf_metadata(content: bytes) -> Date | None:
@@ -380,7 +418,7 @@ def _pdf_metadata(content: bytes) -> Date | None:
         for match in (_PDF_CREATOR.search(content), _PDF_PRODUCER.search(content))
         if match
     )
-    if scanner or not _PDF_TEXT_OPERATOR.search(content):
+    if scanner or not _pdf_has_text_layer(content):
         return None  # a scan's metadata names the scan, not the document
     match = _PDF_CREATION.search(content)
     if match:
@@ -393,6 +431,21 @@ def _pdf_metadata(content: bytes) -> Date | None:
         if iso:
             return Date(iso, "inferred", "day", f"pdf XMP CreateDate {iso}")
     return None
+
+
+def _pdf_has_text_layer(content: bytes) -> bool:
+    """A text-showing operator in any content stream. Streams are nearly
+    always ``/FlateDecode``, so each is inflated (stdlib ``zlib``) before the
+    search; one that does not inflate is searched as written."""
+    for match in _PDF_STREAM.finditer(content):
+        body = match.group("body")
+        try:
+            body = zlib.decompressobj().decompress(body)
+        except zlib.error:
+            pass
+        if _PDF_TEXT_OPERATOR.search(body):
+            return True
+    return False
 
 
 def _pdf_date_to_iso(raw: str) -> str | None:

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import io
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
 
 from strata.dating import RawUnit, date
+from strata.normalizer import Conversion, normalize
 from strata.record import Date, Record
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,6 +109,8 @@ FIRST_LINE_SHAPES = {
     "iso-inferred-embedded": (b"Entry 2001-06-19 draft\n\nBody text.\n", "2001-06-19", "inferred"),
     "month-name-exact": (b"19 June 2001\n\nBody text.\n", "2001-06-19", "exact"),
     "month-name-inferred-embedded": (b"Notes from the call, 19 June 2001\n\nBody text.\n", "2001-06-19", "inferred"),
+    "month-day-order-exact": (b"June 19, 2001\n\nBody text.\n", "2001-06-19", "exact"),
+    "month-day-order-inferred-embedded": (b"Call notes, June 19, 2001\n\nBody text.\n", "2001-06-19", "inferred"),
     "numeric-unambiguous-exact": (b"14/6/2001\n\nBody text.\n", "2001-06-14", "exact"),
     "numeric-unambiguous-inferred-embedded": (b"Filed 14/6/2001 today\n\nBody text.\n", "2001-06-14", "inferred"),
 }
@@ -227,6 +231,170 @@ def test_a_scanner_named_in_producer_alone_is_unknown_even_with_a_creation_date(
     )
     result = date(RawUnit(path="memos/x.pdf", kind="source", content=pdf))
     assert result == UNKNOWN
+
+
+# --- headers the corpus really sends (round-1 review of #37) ----------------
+
+
+def test_received_headers_with_mixed_zones_compare_without_raising():
+    """``-0000`` parses naive, ``-0500`` aware; the earliest hop is still the
+    earliest instant, so a hop written on the 3rd at 21:00 -0500 (02:00 UTC
+    on the 4th) is later than one written on the 4th at 01:00 -0000."""
+    content = (
+        b"Received: from c by d; Mon, 3 Sep 2001 21:00:00 -0500\r\n"
+        b"Received: from a by b; Tue, 4 Sep 2001 01:00:00 -0000\r\n"
+        b"Subject: x\r\n\r\nbody\r\n"
+    )
+    result = date(RawUnit(path="mail/x.eml", kind="source", content=content))
+    assert result == Date("2001-09-04", "inferred", "day", "Received Tue, 4 Sep 2001 01:00:00 -0000")
+
+
+def test_a_received_header_with_no_zone_at_all_still_compares():
+    content = (
+        b"Received: from c by d; Tue, 4 Sep 2001 15:44:10 -0500\r\n"
+        b"Received: from a by b; Mon, 3 Sep 2001 23:30:00\r\n"
+        b"Subject: x\r\n\r\nbody\r\n"
+    )
+    result = date(RawUnit(path="mail/x.eml", kind="source", content=content))
+    assert result == Date("2001-09-03", "inferred", "day", "Received Mon, 3 Sep 2001 23:30:00")
+
+
+def test_an_8_bit_date_header_is_read_and_its_wording_stays_encodable():
+    """Raw 8-bit bytes in a header come back as ``email.header.Header``, not
+    ``str`` (the corpus is ISO-8859-1 email). The date is still read and the
+    verbatim wording carries no surrogate escapes."""
+    content = b"Date: Tue, 4 Sep 2001 15:44:10 -0500 caf\xc3\xa9\r\nSubject: x\r\n\r\nbody\r\n"
+    result = date(RawUnit(path="mail/x.eml", kind="source", content=content))
+    assert result == Date("2001-09-04", "exact", "day", "Tue, 4 Sep 2001 15:44:10 -0500 caf\u00e9")
+    result.text.encode("utf-8")
+
+
+def test_an_8_bit_received_header_is_read_when_date_is_absent():
+    content = (
+        b"Received: from caf\xe9 by b; Tue, 4 Sep 2001 15:44:10 -0500\r\n"
+        b"Subject: x\r\n\r\nbody\r\n"
+    )
+    result = date(RawUnit(path="mail/x.eml", kind="source", content=content))
+    assert result == Date("2001-09-04", "inferred", "day", "Received Tue, 4 Sep 2001 15:44:10 -0500")
+
+
+def test_a_garbled_8_bit_date_header_falls_through_to_received():
+    content = (
+        b"Date: \xff\xfe not a date\r\n"
+        b"Received: from a by b; Tue, 4 Sep 2001 15:44:10 -0500\r\n"
+        b"Subject: x\r\n\r\nbody\r\n"
+    )
+    result = date(RawUnit(path="mail/x.eml", kind="source", content=content))
+    assert result == Date("2001-09-04", "inferred", "day", "Received Tue, 4 Sep 2001 15:44:10 -0500")
+
+
+# --- the converter's paragraphs: the author's words beat docx and pdf metadata
+
+
+def _docx_bytes(created: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr(
+            "docProps/core.xml",
+            '<?xml version="1.0"?><cp:coreProperties '
+            'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            f'<dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created>'
+            "</cp:coreProperties>",
+        )
+    return buf.getvalue()
+
+
+def test_a_docx_first_paragraph_beats_its_created_property():
+    """The template-date failure #8 warns about: a letter written in 2001 on
+    a 1998 template. With the converter's paragraphs in hand, the author's
+    own words win, as they do for every non-email unit."""
+    unit = RawUnit(
+        path="memos/x.docx", kind="source", content=_docx_bytes("1998-03-15T10:00:00Z"),
+        paragraphs=("19 June 2001", "To the operator, concerning the forced outage."),
+    )
+    assert date(unit) == Date("2001-06-19", "exact", "day", "19 June 2001")
+
+
+def test_a_docx_whose_paragraphs_carry_no_date_still_dates_from_its_created_property():
+    unit = RawUnit(
+        path="memos/x.docx", kind="source", content=_docx_bytes("1998-03-15T10:00:00Z"),
+        paragraphs=("To the operator, concerning the forced outage.", "We scheduled at forty percent."),
+    )
+    assert date(unit) == Date("1998-03-15", "inferred", "day", "docx created 1998-03-15")
+
+
+def test_a_pdf_first_paragraph_beats_its_creation_date():
+    unit = RawUnit(
+        path="memos/outage-notice.pdf", kind="source",
+        content=(SOURCES / "memos/outage-notice.pdf").read_bytes(),
+        paragraphs=("# Notice of 12 February 2002", "Derate to fifty percent."),
+    )
+    assert date(unit) == Date("2002-02-12", "inferred", "day", "Notice of 12 February 2002")
+
+
+def test_the_paragraphs_of_a_text_file_are_read_in_place_of_its_bytes():
+    unit = RawUnit(
+        path="memos/x.txt", kind="source", content=b"Nothing dated here.\n",
+        paragraphs=("19 June 2001", "Body text."),
+    )
+    assert date(unit) == Date("2001-06-19", "exact", "day", "19 June 2001")
+
+
+def test_an_emails_paragraphs_never_repair_a_human_format_date_header():
+    """The normalizer's first paragraph for an email is the header block. A
+    ``Date:`` line in it is transport-header business, tried by rung 1 alone:
+    a human-format one is not repaired by the first-line rung."""
+    content = b"Date: November 4, 2013\r\nSubject: x\r\n\r\nbody\r\n"
+    unit = RawUnit(
+        path="mail/x.eml", kind="source", content=content,
+        paragraphs=("From: a\nTo: b\nDate: November 4, 2013\nSubject: x", "body"),
+    )
+    assert date(unit) == UNKNOWN
+
+
+@pytest.mark.parametrize("relative", WEST_DESK_SOURCES.keys())
+def test_every_west_desk_source_dates_the_same_through_the_normalizers_paragraphs(relative):
+    """The checkbox holds on the real pipeline too: handing the dating module
+    the converter's paragraphs changes no west-desk verdict."""
+    content = (SOURCES / relative).read_bytes()
+    converted = normalize(content, relative)
+    paragraphs = converted.paragraphs if isinstance(converted, Conversion) else ()
+    result = date(RawUnit(path=relative, kind="source", content=content, paragraphs=paragraphs))
+    assert (result.iso, result.confidence, result.granularity) == WEST_DESK_SOURCES[relative]
+
+
+# --- the pdf text-layer test on compressed streams --------------------------
+
+
+def _pdf_bytes(stream: bytes, info: bytes) -> bytes:
+    return b"".join([
+        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n",
+        b"2 0 obj\n<< /Length ", str(len(stream)).encode(), b" /Filter /FlateDecode >>\nstream\n",
+        stream, b"\nendstream\nendobj\n",
+        b"6 0 obj\n<< ", info, b" >>\nendobj\n",
+        b"trailer\n<< /Root 1 0 R /Info 6 0 R >>\n%%EOF\n",
+    ])
+
+
+def test_a_flate_compressed_text_stream_counts_as_a_text_layer():
+    """Real content streams are almost always ``/FlateDecode``; the text
+    operators are found after inflating, so the CreationDate is read."""
+    pdf = _pdf_bytes(
+        zlib.compress(b"BT /F1 12 Tf 72 720 Td (Planned outage, Cascade tie) Tj ET"),
+        b"/Creator (Ruth Kessler) /Producer (Meridian Print Service 1.2) /CreationDate (D:20020205101500-06'00')",
+    )
+    result = date(RawUnit(path="memos/x.pdf", kind="source", content=pdf))
+    assert result == Date("2002-02-05", "inferred", "day", "pdf CreationDate 2002-02-05")
+
+
+def test_a_pdf_with_no_text_layer_is_unknown_even_without_a_scanner_name():
+    pdf = _pdf_bytes(
+        zlib.compress(b"q 612 0 0 792 0 0 cm /Im0 Do Q"),
+        b"/Creator (Acrobat) /Producer (Acrobat) /CreationDate (D:20020205101500-06'00')",
+    )
+    assert date(RawUnit(path="memos/x.pdf", kind="source", content=pdf)) == UNKNOWN
 
 
 # --- invariants --------------------------------------------------------------
