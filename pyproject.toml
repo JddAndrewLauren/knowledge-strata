@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "strata"
+version = "0.0.1"
+description = "Persistent, accessible memory across a large corpus, invisible to the user."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strata"]
+
+[tool.pytest.ini_options]
+# The Enron tier (marker e2e) is deselected by default and runs only on the
+# author's machine (wayfinder #12). Everything collected here is hermetic.
+addopts = "-m \"not e2e\" --strict-markers"
+markers = [
+    "e2e: real-corpus tier, deselected by default; fails, never skips, without STRATA_ENRON_ROOT",
+]
+testpaths = ["tests"]
