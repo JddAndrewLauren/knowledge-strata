@@ -175,6 +175,16 @@ class Ledger:
         rows = self._conn.execute("SELECT id FROM units").fetchall()
         return max((_id_number(row["id"]) for row in rows), default=0) + 1
 
+    def known_units(self) -> dict[str, tuple[str, bool]]:
+        """Every registered path, its unit id and its deleted flag - a
+        caller's only way to notice that a path it once registered has
+        vanished from the units it is walking this time (the sources
+        adapter's deletion detection)."""
+        return {
+            row["path"]: (row["id"], bool(row["deleted"]))
+            for row in self._conn.execute("SELECT path, id, deleted FROM units")
+        }
+
     # -- alignment -----------------------------------------------------------
 
     def align(
