@@ -370,6 +370,17 @@ class Ledger:
         marker = f"{canonical} - retired at v{row['retired_v']} ({at}); the v{row['added_v']} text it cited:"
         return f"{marker}\n{text}\nThe record's current text is {unit_id}."
 
+    def live_anchors(self, unit_id: str) -> list[int]:
+        """The current live anchor numbers for ``unit_id``, in document order
+        (the latest version's paragraph order) - an id, not a position
+        (ADR-0001). Read-only: the index module uses this to attach a durable
+        anchor to each paragraph it indexes, on the assumption (the caller's
+        to keep true) that the paragraphs it is given are the same list, in
+        the same order, most recently passed to :meth:`align` for this unit.
+        Empty for an unregistered or never-aligned unit."""
+        last_n = self._last_version(unit_id)
+        return self._order_json(unit_id, last_n) if last_n else []
+
     def range(self, ref: str) -> list[tuple[int, str]] | str:
         """Live anchors between two endpoints inclusive, in current document
         order regardless of numeric labels. A reversed range raises; a
