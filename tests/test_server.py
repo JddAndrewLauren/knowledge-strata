@@ -17,6 +17,7 @@ from pathlib import Path
 
 from strata.corpus import manuscript, notes, sources
 from strata.embeddings import FakeEmbedder
+from strata.index import REPLY_TOKEN_BUDGET
 from strata.ledger import Ledger
 from strata.server import Project, build_server, main
 
@@ -176,6 +177,20 @@ def test_an_internal_exception_is_sanitized(tmp_path, monkeypatch):
     assert "search" in message
 
 
+def test_an_incidental_value_error_is_sanitized_too(tmp_path, monkeypatch):
+    import strata.index as index_module
+
+    project = _project(tmp_path)
+
+    def _boom(self, *args, **kwargs):
+        raise ValueError("labels leave no room: budget_bytes=-12")
+
+    monkeypatch.setattr(index_module.Index, "read", _boom)
+    message = _error_text(_call(project, "read", {"ref": "SRC-000001"}))
+    assert "budget_bytes" not in message
+    assert "read" in message
+
+
 # -- freshness, revisions, cursor invalidation ----------------------------------
 
 
@@ -281,6 +296,13 @@ def test_demo_e2e_over_west_desk(tmp_path):
         chunk_tokens=500,
     )
     project = Project(folder=project_folder, embedder=FakeEmbedder(), cache_db=tmp_path / "store.db")
+    replies: list[str] = []
+
+    def reply(result) -> str:
+        """Every reply this test receives, so the cap below covers all of
+        them - the browse continuation pages included."""
+        replies.append(_text(result))
+        return replies[-1]
 
     # -- ground truth record counts, from the adapters directly ---------------
     truth_ledger = Ledger(tmp_path / "truth-ledger.db")
@@ -294,36 +316,36 @@ def test_demo_e2e_over_west_desk(tmp_path):
     truth_manuscript = len(manuscript.read(manuscript_dir).records)
 
     # -- record counts by kind -------------------------------------------------
-    assert _int_field(_text(_call(project, "search", {"kind": "source"})), "evidence_total") == truth_sources
-    assert _int_field(_text(_call(project, "search", {"kind": "note"})), "evidence_total") == truth_notes
+    assert _int_field(reply(_call(project, "search", {"kind": "source"})), "evidence_total") == truth_sources
+    assert _int_field(reply(_call(project, "search", {"kind": "note"})), "evidence_total") == truth_notes
     assert (
-        _int_field(_text(_call(project, "search", {"kind": "manuscript"})), "evidence_total") == truth_manuscript
+        _int_field(reply(_call(project, "search", {"kind": "manuscript"})), "evidence_total") == truth_manuscript
     )
 
     # -- a manuscript heading ref resolves --------------------------------------
-    body = _text(_call(project, "read", {"ref": "manuscript/ch02-the-cutoff.md # Morning (2)"}))
+    body = reply(_call(project, "read", {"ref": "manuscript/ch02-the-cutoff.md # Morning (2)"}))
     assert "The second heading called Morning is here on purpose" in body
 
     # -- who: PV finds Priya's mail ----------------------------------------------
-    who_text = _text(_call(project, "search", {"who": "PV", "kind": "source"}))
+    who_text = reply(_call(project, "search", {"who": "PV", "kind": "source"}))
     assert _int_field(who_text, "evidence_total") >= 1
 
     # -- a retired anchor (editing a source between calls) reads back with -----
     # -- a marker and its exact original text -----------------------------------
-    query_text = _text(_call(project, "search", {"query": "noon submission"}))
+    query_text = reply(_call(project, "search", {"query": "noon submission"}))
     first_hit_line = _hits_section(query_text).splitlines()[0]
     ref = first_hit_line.split("  ")[0]
 
     journal = sources_dir / "2001" / "June" / "journal-outage-week.txt"
     journal.write_text(journal.read_text(encoding="utf-8").replace(HELD, EDITED), encoding="utf-8")
 
-    retired_text = _text(_call(project, "read", {"ref": ref}))
+    retired_text = reply(_call(project, "read", {"ref": ref}))
     assert any("retired" in line for line in retired_text.splitlines())
     assert HELD in retired_text
 
     # -- the eligible May digest appears in covered; the stale, legacy and -----
     # -- split ones do not --------------------------------------------------------
-    real_revision = _field(_text(_call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"})), "corpus_revision")
+    real_revision = _field(reply(_call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"})), "corpus_revision")
     digest_dir = project_folder / "notes" / "digest"
     may = digest_dir / "2001-05-01--2001-05-31.md"
     # Quoted: the placeholder is a bare (unquoted) YAML string, but a real
@@ -333,7 +355,7 @@ def test_demo_e2e_over_west_desk(tmp_path):
         may.read_text(encoding="utf-8").replace("SET-BY-TEST-AFTER-SYNC", f'"{real_revision}"'), encoding="utf-8"
     )
 
-    covered_text = _text(_call(project, "search", {"from": "2001-04-01", "to": "2001-07-31"}))
+    covered_text = reply(_call(project, "search", {"from": "2001-04-01", "to": "2001-07-31"}))
     covered = _field(covered_text, "covered")
     assert "notes/digest/2001-05-01--2001-05-31.md" in covered
     assert "notes/digest/2001-05-01--2001-05-31-2.md" not in covered  # stale
@@ -343,9 +365,11 @@ def test_demo_e2e_over_west_desk(tmp_path):
     # -- browse over the busy day enumerates more than 500 records through -----
     # -- continuations with no duplicates ------------------------------------------
     seen: list[str] = []
+    browse_pages = 0
     args = {"kind": "source", "from": "2001-10-15", "to": "2001-10-15"}
     for _ in range(20):
-        text = _text(_call(project, "search", args))
+        text = reply(_call(project, "search", args))
+        browse_pages += 1
         seen.extend(line.split("  ")[0] for line in _hits_section(text).splitlines() if line.strip())
         cursor = _field(text, "continuations")
         if cursor == "none":
@@ -358,5 +382,10 @@ def test_demo_e2e_over_west_desk(tmp_path):
 
     # -- every reply stays within the ~8,000-token estimate and ends with -------
     # -- reply_tokens -----------------------------------------------------------------
-    for text in (query_text, who_text, covered_text, retired_text):
-        assert re.search(r"^reply_tokens\s+~\d+$", text, re.MULTILINE)
+    assert browse_pages >= 2  # the continuation pages are the replies most likely to overrun
+    for text in replies:
+        # A search reply carries reply_tokens as the header's closing field,
+        # hits after it; a read reply ends with it. Either way it is the
+        # reply's own estimate of itself, and it must fit the budget.
+        assert re.search(r"^reply_tokens\s+~\d+$", text, re.MULTILINE), f"no reply_tokens line in:\n{text}"
+        assert _int_field(text, "reply_tokens") <= REPLY_TOKEN_BUDGET

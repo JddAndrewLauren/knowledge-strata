@@ -37,13 +37,17 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from strata import config
+from strata import config, refs
 from strata.corpus import manuscript, notes, sources
 from strata.embeddings import Embedder, FastEmbedEmbedder
-from strata.index import Index, SearchReply, estimate_tokens
+from strata.index import BadRef, CursorError, Index, SearchReply, estimate_tokens
 from strata.ledger import Ledger
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+# The model-visible errors (design.md "Two tools"): a bad ref, a conflicting or
+# invalidated cursor, a project with no config. Every other exception - an
+# incidental ValueError included - is left for the SDK to sanitize.
+_MODEL_VISIBLE = (BadRef, refs.BadRef, CursorError, config.ConfigError)
 _T = TypeVar("_T")
 
 
@@ -93,7 +97,8 @@ def _sync_now(project: Project, cfg: config.ProjectConfig, ledger: Ledger, index
             records.extend(notes.read(notes_folder))
         if cfg.manuscript:
             records.extend(manuscript.read(_resolve(project.folder, cfg.manuscript)).records)
-    except Exception:
+    except Exception as error:
+        print(f"strata: sync failed after {len(records)} records: {error!r}", file=sys.stderr)
         if index.indexing_state != "complete":
             index.sync(records, complete=False)
         return
@@ -123,7 +128,7 @@ def _suppress_coverage_if_incomplete(reply: SearchReply) -> SearchReply:
     ``covered`` rows a partial index happens to carry."""
     if reply.indexing == "complete" or not reply.covered:
         return reply
-    draft = replace(reply, covered=(), reply_tokens=0)
+    draft = replace(reply, covered=[], reply_tokens=0)
     return replace(draft, reply_tokens=estimate_tokens(draft.text()))
 
 
@@ -155,7 +160,7 @@ def build_server(project: Project) -> MCPServer:
                 project,
                 lambda index: index.search(query=query, from_=from_, to=to, who=who, kind=kind, cursor=cursor),
             )
-        except ValueError as error:
+        except _MODEL_VISIBLE as error:
             raise ToolError(str(error)) from error
         return _suppress_coverage_if_incomplete(reply).text()
 
@@ -167,7 +172,7 @@ def build_server(project: Project) -> MCPServer:
         ``ref`` may be omitted with it, or must match."""
         try:
             reply = _call(project, lambda index: index.read(ref=ref, cursor=cursor))
-        except ValueError as error:
+        except _MODEL_VISIBLE as error:
             raise ToolError(str(error)) from error
         return reply.text()
 
