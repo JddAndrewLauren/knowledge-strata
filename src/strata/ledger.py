@@ -44,6 +44,32 @@ def _id_number(unit_id: str) -> int:
 
 
 @dataclass(frozen=True)
+class RetiredAnchor:
+    """A retired anchor's parts (CONTEXT.md: retired anchor, retired text),
+    structured rather than a marker/text/pointer string a caller has to
+    split apart: the version it retired at and that version's ``at``, the
+    version it was added at, its exact retired text, and the bare record
+    ref (``ref``) - never the anchor itself, since a retired anchor is never
+    a suggested replacement (ADR-0001).
+
+    ``marker`` and ``pointer`` are the labels :meth:`Ledger.text` composes
+    around the payload; the wording lives here so both share one source.
+    """
+
+    ref: str
+    retired_v: int
+    at: str
+    added_v: int
+    text: str
+
+    def marker(self, canonical: str) -> str:
+        return f"{canonical} - retired at v{self.retired_v} ({self.at}); the v{self.added_v} text it cited:"
+
+    def pointer(self) -> str:
+        return f"The record's current text is {self.ref}."
+
+
+@dataclass(frozen=True)
 class AlignResult:
     """One unit's outcome from :meth:`Ledger.align` or :meth:`Ledger.retire_unit`.
 
@@ -345,13 +371,14 @@ class Ledger:
     def text(self, ref: str) -> str:
         """Live text for a single paragraph anchor, or for a retired one the
         marker, its exact original text and the bare-record pointer (never a
-        suggested replacement)."""
+        suggested replacement). Rebuilt on :meth:`retired_anchor` for the
+        retired case; unchanged return value for existing callers."""
         parsed = refs.parse(ref)
         if not isinstance(parsed, refs.SourceRef) or parsed.anchor is None or parsed.end is not None or parsed.tail:
             raise ValueError(f"text() takes a single paragraph anchor, not {ref!r} - use range() for a span")
         unit_id = parsed.id
         row = self._conn.execute(
-            "SELECT id, added_v, retired_v FROM anchors WHERE unit_id = ? AND p = ?",
+            "SELECT id, retired_v FROM anchors WHERE unit_id = ? AND p = ?",
             (unit_id, parsed.anchor),
         ).fetchone()
         if row is None:
@@ -360,15 +387,35 @@ class Ledger:
             return self._conn.execute(
                 "SELECT text FROM active_text WHERE anchor_id = ?", (row["id"],)
             ).fetchone()["text"]
+        retired = self.retired_anchor(ref)
+        canonical = refs.render(parsed)
+        return f"{retired.marker(canonical)}\n{retired.text}\n{retired.pointer()}"
+
+    def retired_anchor(self, ref: str) -> RetiredAnchor:
+        """The structured parts of one retired paragraph anchor (CONTEXT.md:
+        retired anchor, retired text): the version it retired at and that
+        version's ``at``, the version it was added at, its exact retired
+        text, and the bare record ref - no marker/text/pointer string for a
+        caller to split apart."""
+        parsed = refs.parse(ref)
+        if not isinstance(parsed, refs.SourceRef) or parsed.anchor is None or parsed.end is not None or parsed.tail:
+            raise ValueError(f"retired_anchor() takes a single paragraph anchor, not {ref!r} - use range() for a span")
+        unit_id = parsed.id
+        row = self._conn.execute(
+            "SELECT id, added_v, retired_v FROM anchors WHERE unit_id = ? AND p = ?",
+            (unit_id, parsed.anchor),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no such anchor: {ref}")
+        if row["retired_v"] is None:
+            raise ValueError(f"anchor is still live, not retired: {ref}")
         text = self._conn.execute(
             "SELECT text FROM retired_text WHERE anchor_id = ?", (row["id"],)
         ).fetchone()["text"]
         at = self._conn.execute(
             "SELECT at FROM versions WHERE unit_id = ? AND n = ?", (unit_id, row["retired_v"])
         ).fetchone()["at"]
-        canonical = refs.render(parsed)
-        marker = f"{canonical} - retired at v{row['retired_v']} ({at}); the v{row['added_v']} text it cited:"
-        return f"{marker}\n{text}\nThe record's current text is {unit_id}."
+        return RetiredAnchor(ref=unit_id, retired_v=row["retired_v"], at=at, added_v=row["added_v"], text=text)
 
     def live_anchors(self, unit_id: str) -> list[int]:
         """The current live anchor numbers for ``unit_id``, in document order
