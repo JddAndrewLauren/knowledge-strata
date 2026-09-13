@@ -25,10 +25,13 @@ Never opens an attachment and never writes inside a corpus root.
 
 The converter id in the cache key and passed to ``Ledger.align`` carries its
 hand-bumped version (``eml@1``, :func:`strata.normalizer.converter_id`), so
-bumping it alone misses the cache and re-converts. The ledger remembers the
-dating ruleset version it last aligned under (issue #45); on the one sync
-where :data:`strata.dating.DATING_VERSION` has moved, every unit is passed
-``dated=True`` so it gets a new version without a reconversion.
+bumping it alone misses the cache and re-converts. Once every unit is aligned
+under the current id, the cache sweeps the rows a bump - or a bare pre-#45
+converter name - left behind (issue #54); a sync with no bump sweeps nothing.
+The ledger remembers the dating ruleset version it last aligned under (issue
+#45); on the one sync where :data:`strata.dating.DATING_VERSION` has moved,
+every unit is passed ``dated=True`` so it gets a new version without a
+reconversion.
 """
 
 from __future__ import annotations
@@ -86,6 +89,7 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
 
     skipped: list[Skip] = []
     pending: list[tuple[str, str, bytes, str, str, tuple[str, ...], str]] = []
+    current_converters: dict[str, str] = {}  # converter name -> the id used this sync
 
     with _ConversionCache(cache_db) as cache:
         for key, relative, path in units:
@@ -93,6 +97,7 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
             if converter is None:
                 skipped.append(Skip(relative, f"no converter claims the suffix {path.suffix.lower()!r}"))
                 continue
+            current_converters[converter.split("@", 1)[0]] = converter
             content = path.read_bytes()
             sha256 = hashlib.sha256(content).hexdigest()
             cached = cache.get(sha256, converter)
@@ -115,6 +120,12 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
             else:
                 paragraphs, title = cached.paragraphs, cached.title
             pending.append((key, relative, content, sha256, converter, paragraphs, title))
+
+        # Every unit's conversion is cached above under its current converter
+        # id; only now is it safe to sweep the rows a bumped converter (or a
+        # bare pre-#45 name) left behind, so an interrupted sync never leaves
+        # the cache with neither generation.
+        cache.sweep(current_converters)
 
     ids = ledger.register([key for key, *_ in pending])
     records = []
@@ -208,6 +219,12 @@ class _ConversionCache:
             "paragraphs TEXT, title TEXT, skip_reason TEXT, "
             "PRIMARY KEY (sha256, converter))"
         )
+        # The converter id (``text@2``) this cache last swept ``conversions``
+        # for, one row per converter name - how a bump is told apart from an
+        # unchanged sync without re-deriving it from the rows themselves.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS converter_generations (name TEXT PRIMARY KEY, converter TEXT NOT NULL)"
+        )
         self._conn.commit()
 
     def __enter__(self) -> _ConversionCache:
@@ -243,3 +260,26 @@ class _ConversionCache:
                 "VALUES (?, ?, NULL, NULL, ?)",
                 (sha256, converter, reason),
             )
+
+    def sweep(self, current: dict[str, str]) -> None:
+        """Delete rows left behind by a superseded converter id, for every
+        converter name used this sync (``current``: name -> the id, e.g.
+        ``{"text": "text@2"}``). A name's superseded keys are its bare
+        pre-#45 name and any version other than ``current``; a name whose id
+        matches what was swept for last time is untouched, so an unbumped
+        converter, or a second sync at the same version, deletes nothing."""
+        with self._conn:
+            for name, converter in current.items():
+                row = self._conn.execute(
+                    "SELECT converter FROM converter_generations WHERE name = ?", (name,)
+                ).fetchone()
+                if row is not None and row[0] == converter:
+                    continue
+                self._conn.execute(
+                    "DELETE FROM conversions WHERE converter = ? OR (converter LIKE ? AND converter != ?)",
+                    (name, f"{name}@%", converter),
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO converter_generations (name, converter) VALUES (?, ?)",
+                    (name, converter),
+                )
