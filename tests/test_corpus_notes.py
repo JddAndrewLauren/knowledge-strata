@@ -276,3 +276,18 @@ def test_the_generated_oversized_note_keeps_its_text_intact(tmp_path):
     # the check is that the ~40,000 characters stay in one unsplit paragraph.
     assert any(big.rstrip() in paragraph for paragraph in record.paragraphs), "the oversized text was split"
     assert paths["note"].exists()
+
+
+# --- dotfiles and hidden folders are passed over -----------------------------
+
+
+def test_notes_under_a_hidden_folder_are_passed_over(tmp_path):
+    notes = tmp_path / "notes"
+    (notes / ".obsidian").mkdir(parents=True)
+    (notes / "project.md").write_text("# Project\n\nOverview.\n", encoding="utf-8")
+    (notes / ".obsidian" / "workspace.md").write_text("# Not a note\n", encoding="utf-8")
+    (notes / ".draft.md").write_text("# Not a note either\n", encoding="utf-8")
+
+    records = read(notes)
+
+    assert [record.ref for record in records] == ["notes/project.md"]

@@ -40,10 +40,15 @@ _WORD_CAP = 2000
 
 def read(folder: str | Path) -> tuple[Record, ...]:
     """Every ``*.md`` under ``folder`` (the project's ``notes/`` root), one
-    Record each, in path order. Never refuses: a malformed note is indexed
-    with a warning (design.md)."""
+    Record each, in path order; dotfiles and hidden folders are passed over,
+    as every adapter passes over them (CONTEXT.md, "Skip"). Never refuses: a
+    malformed note is indexed with a warning (design.md)."""
     folder = Path(folder)
-    return tuple(_read_one(folder, path) for path in sorted(folder.rglob("*.md")))
+    paths = (
+        path for path in sorted(folder.rglob("*.md"))
+        if not any(part.startswith(".") for part in path.relative_to(folder).parts)
+    )
+    return tuple(_read_one(folder, path) for path in paths)
 
 
 def _read_one(folder: Path, path: Path) -> Record:

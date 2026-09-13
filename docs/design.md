@@ -144,7 +144,7 @@ memoria code being reused has none: three of four converters hardcode an
 empty date and the one that does not stores a verbatim header string that
 cannot be compared.
 
-Interface: raw unit (bytes, path, kind, converter metadata) in; ISO-sortable
+Interface: raw unit (path, kind, bytes, converted paragraphs) in; ISO-sortable
 date, confidence, and the verbatim wording out. Converters do not touch date
 fields.
 

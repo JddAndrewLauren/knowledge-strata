@@ -3,6 +3,8 @@ guard (wayfinder #28). ``tests/test_west_desk_fixtures.py`` pins the
 fixtures themselves; this file converts them and checks the result.
 """
 
+import re
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -196,3 +198,94 @@ def test_no_converter_sets_or_reads_a_date(relative):
     result = normalize(raw, relative)
     if isinstance(result, Conversion):
         assert not any("date" in key.lower() for key in result.metadata)
+        for value in result.metadata.values():
+            assert isinstance(value, str)
+            assert not _ISO_DAY.search(value), f"{relative}: metadata carries a date: {value!r}"
+        assert not _ISO_DAY.search(result.title), f"{relative}: title carries an ISO date: {result.title!r}"
+
+
+_ISO_DAY = re.compile(r"\b(19|20)\d\d-\d\d-\d\d\b")
+
+
+def test_an_email_date_header_is_copied_verbatim_and_read_by_nothing_else():
+    """Changing only the Date header changes only the header paragraph's
+    Date line, and that line is the header's own wording: nothing parses,
+    reformats or derives anything from it."""
+    raw = (MAIL / "plain.eml").read_bytes()
+    header_line = next(line for line in raw.splitlines() if line.startswith(b"Date:"))
+    replaced = raw.replace(header_line, b"Date: Sun, 7 Jan 1990 03:04:05 +0900", 1)
+
+    original = normalize(raw, "mail/plain.eml")
+    changed = normalize(replaced, "mail/plain.eml")
+    assert isinstance(original, Conversion) and isinstance(changed, Conversion)
+
+    date_line = next(line for line in changed.paragraphs[0].split("\n") if line.startswith("Date:"))
+    assert date_line == "Date: Sun, 7 Jan 1990 03:04:05 +0900"
+    assert changed.paragraphs[0].replace(date_line, "") == original.paragraphs[0].replace(
+        next(line for line in original.paragraphs[0].split("\n") if line.startswith("Date:")), ""
+    )
+    assert changed.paragraphs[1:] == original.paragraphs[1:]
+    assert changed.title == original.title
+    assert changed.metadata == original.metadata
+
+
+def test_a_docx_created_property_does_not_reach_the_conversion(tmp_path):
+    import docx
+
+    def build(created: datetime) -> bytes:
+        document = docx.Document()
+        document.add_paragraph("Desk rota for the week.")
+        document.core_properties.created = created
+        path = tmp_path / f"rota-{created.year}.docx"
+        document.save(str(path))
+        return path.read_bytes()
+
+    early = normalize(build(datetime(1990, 1, 7, 3, 4, 5)), "memos/rota.docx")
+    late = normalize(build(datetime(2001, 6, 19, 23, 10, 0)), "memos/rota.docx")
+    assert isinstance(early, Conversion)
+    assert early == late
+    assert early.metadata == {}
+
+
+# --- docx heading styles ---------------------------------------------------------
+
+
+def _docx_with_heading(tmp_path, *, level: int) -> bytes:
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("Circulated to the west desk only.")
+    document.add_heading("Revised cutoff procedure", level=level)
+    document.add_paragraph("Schedules after the cutoff go to Ruth first.")
+    path = tmp_path / f"heading-{level}.docx"
+    document.save(str(path))
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_a_docx_heading_or_title_style_paragraph_becomes_the_title(tmp_path, level):
+    """Level 0 is python-docx's ``Title`` style, 1 and 2 are ``Heading 1``
+    and ``Heading 2``. The first such paragraph is the title even when a
+    Normal paragraph precedes it, and it stays in the paragraphs as text."""
+    result = normalize(_docx_with_heading(tmp_path, level=level), "memos/cutoff.docx")
+    assert isinstance(result, Conversion)
+    assert result.title == "Revised cutoff procedure"
+    assert result.paragraphs == (
+        "Circulated to the west desk only.",
+        "Revised cutoff procedure",
+        "Schedules after the cutoff go to Ruth first.",
+    )
+
+
+def test_only_the_first_docx_heading_becomes_the_title(tmp_path):
+    import docx
+
+    document = docx.Document()
+    document.add_heading("First heading", level=1)
+    document.add_paragraph("Body.")
+    document.add_heading("Second heading", level=1)
+    path = tmp_path / "two-headings.docx"
+    document.save(str(path))
+    result = normalize(path.read_bytes(), "memos/two-headings.docx")
+    assert isinstance(result, Conversion)
+    assert result.title == "First heading"

@@ -439,3 +439,41 @@ def test_the_module_never_reads_file_mtime():
     assert "import os" not in source
     assert "st_mtime" not in source
     assert "getmtime" not in source
+
+
+@pytest.mark.parametrize(
+    "name, content",
+    [
+        ("undated.txt", b"Desk notes\n\nNothing here names a day.\n"),
+        ("dated.txt", b"19 June 2001\n\nThe tie went out.\n"),
+    ],
+)
+def test_dating_results_do_not_depend_on_the_files_mtime(tmp_path, monkeypatch, name, content):
+    """Behavioral: the same unit dates identically under two distinctive
+    mtimes, and still dates with every stat call made to fail - so an
+    undated file stays unknown rather than borrowing its mtime."""
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / name).write_bytes(content)
+    unit = RawUnit(path=name, kind="source", content=content)
+
+    os.utime(name, (0, 946_684_800))  # 2000-01-01
+    first = date(unit)
+    os.utime(name, (0, 1_234_567_890))  # 2009-02-13
+    second = date(unit)
+    assert first == second
+    assert "2000" not in first.iso and "2009" not in first.iso
+
+    def no_stat(*args, **kwargs):
+        raise AssertionError("dating touched the filesystem")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "stat", no_stat)
+        patched.setattr(os, "lstat", no_stat)
+        patched.setattr(os.path, "getmtime", no_stat)
+        patched.setattr(Path, "stat", no_stat)
+        third = date(unit)
+    assert third == first
+    if name == "undated.txt":
+        assert first == UNKNOWN
