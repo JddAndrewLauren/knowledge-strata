@@ -486,3 +486,83 @@ def _downgrade_corpus_revision_table(path: Path) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(corpus_revision)")}
     conn.close()
     assert columns == {"id", "token"}
+
+
+# -- issue #54: a converter bump sweeps its own stale generation ------------
+
+
+def _cache_rows_by_converter(cache_db: Path) -> dict[str, int]:
+    import sqlite3
+
+    conn = sqlite3.connect(str(cache_db))
+    rows = conn.execute("SELECT converter, COUNT(*) FROM conversions GROUP BY converter").fetchall()
+    conn.close()
+    return dict(rows)
+
+
+def _seed_bare_converter_row(cache_db: Path, converter: str) -> None:
+    """A row under a pre-#45 bare converter name (no ``@version``), as a
+    real cache written before that change would hold."""
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(str(cache_db))
+    with conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversions ("
+            "sha256 TEXT NOT NULL, converter TEXT NOT NULL, "
+            "paragraphs TEXT, title TEXT, skip_reason TEXT, "
+            "PRIMARY KEY (sha256, converter))"
+        )
+        conn.execute(
+            "INSERT INTO conversions (sha256, converter, paragraphs, title, skip_reason) "
+            "VALUES (?, ?, ?, ?, NULL)",
+            ("stale-sha", converter, json.dumps(["a stale paragraph"]), "a stale title"),
+        )
+    conn.close()
+
+
+def test_bumping_a_converter_sweeps_only_its_own_stale_generation(tmp_path, monkeypatch):
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+
+    before = _cache_rows_by_converter(cache_db)
+    text_v1 = f"text@{sources.normalizer.CONVERTER_VERSIONS['text']}"
+    assert before[text_v1] > 0
+    others_before = {converter: count for converter, count in before.items() if converter != text_v1}
+
+    monkeypatch.setitem(
+        sources.normalizer.CONVERTER_VERSIONS, "text", sources.normalizer.CONVERTER_VERSIONS["text"] + 1
+    )
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+
+    after = _cache_rows_by_converter(cache_db)
+    text_v2 = f"text@{sources.normalizer.CONVERTER_VERSIONS['text']}"
+    assert text_v1 not in after  # every stale text@1 row is gone
+    assert after[text_v2] == before[text_v1]  # the new generation replaces it row for row
+    for converter, count in others_before.items():
+        assert after[converter] == count  # converters that did not bump keep every row
+
+
+def test_a_bare_pre_issue_45_row_is_swept_on_the_first_sync_that_versions_its_converter(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    _seed_bare_converter_row(cache_db, "text")
+
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+
+    after = _cache_rows_by_converter(cache_db)
+    assert "text" not in after  # the bare pre-#45 key is gone
+    assert after[f"text@{sources.normalizer.CONVERTER_VERSIONS['text']}"] > 0
+
+
+def test_a_second_sync_at_the_same_versions_sweeps_nothing(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+    before = _cache_rows_by_converter(cache_db)
+
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+
+    assert _cache_rows_by_converter(cache_db) == before
