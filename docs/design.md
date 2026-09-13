@@ -225,6 +225,8 @@ The revised contract below supersedes the original resolution on #10.
 One hit per record and RRF k=60 with equal weights remain. `who` expands
 matching note titles, stems and aliases into an FTS phrase predicate shared
 by both branches; unknown dates pass, partial dates use period overlap.
+A lexical query is its terms combined with AND, double quotes mark a phrase,
+and `who` matches phrases regardless of that parsing.
 Browse orders by date then ref, unknown last; query results order by fused
 relevance with stable ref ties.
 

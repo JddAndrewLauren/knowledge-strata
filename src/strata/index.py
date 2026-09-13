@@ -187,6 +187,34 @@ def _fts_phrase(text: str) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
+def _fts_expression(query: str) -> str:
+    """A query's lexical branch expression (#46): terms combined with AND,
+    double quotes mark a phrase, an unbalanced quote runs to the end of the
+    query. Each bare term and each quoted run becomes one ``_fts_phrase``, so
+    FTS5 syntax characters (``e-mail``, ``gas*``, ``NOT``, ``(``) are matched
+    literally and never raise. A query of only quotes or whitespace parses to
+    ``""`` - the caller's empty-query browse case. ``who`` stays exact-phrase
+    via ``_fts_phrase`` directly; this function is not used there."""
+    phrases = []
+    i, n = 0, len(query)
+    while i < n:
+        ch = query[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == '"':
+            end = query.find('"', i + 1)
+            content, i = (query[i + 1 : end], end + 1) if end != -1 else (query[i + 1 :], n)
+        else:
+            j = i
+            while j < n and not query[j].isspace() and query[j] != '"':
+                j += 1
+            content, i = query[i:j], j
+        if content.strip():
+            phrases.append(_fts_phrase(content))
+    return " AND ".join(phrases)
+
+
 def _browse_key(row: sqlite3.Row) -> tuple:
     """Browse order: ``iso`` ascending, then ref, unknown last (#10 ss9)."""
     return (row["confidence"] == "unknown", row["iso"], row["ref"])
@@ -928,12 +956,14 @@ class Index:
     # -- hybrid query evidence -------------------------------------------------
 
     def _lexical_paragraph_rows(self, query: str) -> list[sqlite3.Row]:
-        phrase = _fts_phrase(query)
+        expression = _fts_expression(query)
+        if not expression:
+            return []
         return self._conn.execute(
             "SELECT p.id AS id, p.ref AS ref, p.idx AS idx FROM paragraph_fts "
             "JOIN paragraphs p ON p.id = paragraph_fts.rowid "
             "WHERE paragraph_fts MATCH ? ORDER BY bm25(paragraph_fts), p.ref, p.idx",
-            (phrase,),
+            (expression,),
         ).fetchall()
 
     def _semantic_paragraph_ids(
@@ -1033,11 +1063,11 @@ class Index:
 
     def _snippet(self, query: str, paragraph_id: int, is_lexical: bool, text: str) -> str:
         if is_lexical:
-            phrase = _fts_phrase(query)
+            expression = _fts_expression(query)
             row = self._conn.execute(
                 "SELECT snippet(paragraph_fts, 0, '', '', '...', 32) AS s "
                 "FROM paragraph_fts WHERE rowid = ? AND paragraph_fts MATCH ?",
-                (paragraph_id, phrase),
+                (paragraph_id, expression),
             ).fetchone()
             if row is not None:
                 return row["s"]
@@ -1091,7 +1121,7 @@ class Index:
         eligible = self._eligible_refs(from_=from_, to=to, who_matches=who_matches, kind=kind)
         record_rows = {row["ref"]: row for row in self._all_record_rows() if row["ref"] in eligible}
 
-        if query:
+        if _fts_expression(query):
             evidence = self._query_evidence(
                 query, eligible, from_=from_, to=to, kind=kind, who_matches=who_matches
             )
