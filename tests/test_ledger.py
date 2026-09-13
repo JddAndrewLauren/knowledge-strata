@@ -317,6 +317,17 @@ def test_corpus_revision_advances_on_content_deletion_converter_and_dating_chang
 # -- the alignment helper in isolation --------------------------------------
 
 
+# -- dating version: issue #45 ------------------------------------------
+
+
+def test_dating_version_starts_unset_and_persists_once_recorded(ledger):
+    assert ledger.dating_version() is None
+    ledger.set_dating_version(1)
+    assert ledger.dating_version() == 1
+    ledger.set_dating_version(2)
+    assert ledger.dating_version() == 2
+
+
 def test_match_paragraphs_pairs_equal_duplicates_in_document_order():
     old = [(1, "a"), (2, "dup"), (3, "dup"), (4, "b")]
     assignment, retiring = _match_paragraphs(old, ["dup", "z", "dup"])
