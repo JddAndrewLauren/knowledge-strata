@@ -300,3 +300,31 @@ def test_scale_walks_pass_500_records_with_no_id_gaps_in_bounded_time(tmp_path, 
     ids = sorted(int(record.ref.removeprefix("SRC-")) for record in report.records)
     assert ids == list(range(1, len(ids) + 1))  # no id gaps
     assert elapsed < 60, f"sync of {len(report.records)} records took {elapsed:.1f}s"
+
+
+# -- issue #43: an empty-Subject email's title falls back to its own ref ----
+
+
+def test_an_empty_subject_emails_record_title_equals_its_rendered_ref(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    report = sources.sync([SOURCES], ledger, cache_db=tmp_path / "store.db")
+    units = ledger.known_units()
+    unit_id, _ = units["000/mail/empty-body.eml"]
+    record = next(r for r in report.records if r.ref == unit_id)
+    assert record.title == record.ref
+
+
+# -- issue #43: one suffix map, owned by the normalizer ----------------------
+
+
+def test_the_adapter_defines_no_suffix_literal_map():
+    assert not hasattr(sources, "_CONVERTER_NAMES")
+
+
+def test_an_unclaimed_suffixs_skip_reason_is_unchanged(tmp_path):
+    corpus = tmp_path / "sources"
+    corpus.mkdir()
+    (corpus / "export.mbox").write_bytes(b"whatever")
+    ledger = Ledger(tmp_path / "ledger.db")
+    report = sources.sync([corpus], ledger, cache_db=tmp_path / "store.db")
+    assert report.skipped == (sources.Skip("export.mbox", "no converter claims the suffix '.mbox'"),)

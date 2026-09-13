@@ -34,6 +34,7 @@ from io import BytesIO
 from pathlib import PurePosixPath
 from xml.etree import ElementTree
 
+from strata.normalizer import decode_text
 from strata.record import KINDS, Date, Kind
 
 UNKNOWN = Date("", "unknown", "day", "")
@@ -112,7 +113,7 @@ def _headers(message: email.message.Message, name: str) -> list[str]:
     pairs are read instead: their surrogate escapes are the bytes, put back
     and decoded so the verbatim wording is an encodable string."""
     return [
-        _decode(value.encode("utf-8", "surrogateescape"))
+        decode_text(value.encode("utf-8", "surrogateescape"))
         for key, value in message.raw_items()
         if key.lower() == name
     ]
@@ -257,7 +258,7 @@ def _first_line(raw: RawUnit) -> Date | None:
     elif suffix in (".docx", ".pdf"):
         return None  # their words reach this rung only as the converter's paragraphs
     else:
-        text = _decode(raw.content)
+        text = decode_text(raw.content)
     non_empty = [line for line in text.splitlines() if line.strip()]
     if not non_empty:
         return None
@@ -271,13 +272,6 @@ def _first_line(raw: RawUnit) -> Date | None:
         if hit is not None:
             return hit
     return None
-
-
-def _decode(content: bytes) -> str:
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError:
-        return content.decode("latin-1")
 
 
 def _body_hit(candidate: str) -> Date | None:
