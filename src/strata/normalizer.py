@@ -107,7 +107,7 @@ def normalize(raw_bytes: bytes, path: str) -> Result:
 # --- plain text and markdown ------------------------------------------------
 
 
-def _decode_text(raw_bytes: bytes) -> str:
+def decode_text(raw_bytes: bytes) -> str:
     """UTF-8, or cp1252 when the bytes are not UTF-8. Never raises: a unit
     that is not really text at all is a job for the guard below, not an
     exception."""
@@ -117,9 +117,10 @@ def _decode_text(raw_bytes: bytes) -> str:
         return raw_bytes.decode("cp1252", errors="replace")
 
 
-def _split_text_paragraphs(text: str) -> list[str]:
+def split_paragraphs(text: str) -> list[str]:
     """Blank lines split paragraphs; a heading line is always its own
-    paragraph, blank line or not."""
+    paragraph, blank line or not. Public because the notes adapter splits a
+    note's body "like plain text" too (design.md, "Notes frontmatter")."""
     paragraphs: list[str] = []
     current: list[str] = []
 
@@ -144,8 +145,8 @@ def _split_text_paragraphs(text: str) -> list[str]:
 
 
 def _convert_text(raw_bytes: bytes) -> Result:
-    text = _decode_text(raw_bytes)
-    paragraphs = _split_text_paragraphs(text)
+    text = decode_text(raw_bytes)
+    paragraphs = split_paragraphs(text)
     refusal = _guard(text, paragraphs)
     if refusal:
         return refusal
