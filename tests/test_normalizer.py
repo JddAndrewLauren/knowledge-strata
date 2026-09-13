@@ -150,6 +150,39 @@ def test_a_folded_to_header_unfolds_with_no_stray_crlf_and_words_in_order():
     assert to_line.index("Ruth") < to_line.index("Tomas") < to_line.index("Corinne")
 
 
+def test_a_bare_lf_folded_to_header_unfolds_with_tab_and_space_continuations():
+    """The CRLF twin of test_a_folded_to_header_unfolds_with_no_stray_crlf_and_words_in_order,
+    but every line ending is a bare LF: a file that has passed through a text
+    editor on Linux or macOS must unfold exactly the same way."""
+    raw = (
+        b"From: Priya <priya@example.com>\n"
+        b"To: Ruth <ruth@example.com>,\n"
+        b"\tTomas <tomas@example.com>,\n"
+        b" Corinne <corinne@example.com>\n"
+        b"Subject: Desk coverage\n"
+        b"\n"
+        b"Body text.\n"
+    )
+    to_line = next(line for line in _header(raw).split("\n") if line.startswith("To:"))
+    assert "\r" not in to_line and "\n" not in to_line
+    assert to_line.index("Ruth") < to_line.index("Tomas") < to_line.index("Corinne")
+
+
+def test_lf_folded_and_crlf_folded_headers_are_byte_identical():
+    """Issue #53: the same message, folded once with CRLF and once with bare
+    LF, must produce byte-identical header paragraphs."""
+    raw_crlf = (
+        b"From: a@example.com\r\n"
+        b"To: b@example.com\r\n"
+        b"Subject: Desk coverage for the week,\r\n"
+        b" continuing on the next line\r\n"
+        b"\r\n"
+        b"Body.\r\n"
+    )
+    raw_lf = raw_crlf.replace(b"\r\n", b"\n")
+    assert _header(raw_crlf) == _header(raw_lf)
+
+
 @pytest.mark.parametrize(
     "encoded_word",
     ["=?iso-8859-1?Q?caf=E9?=", "=?utf-8?B?Y2Fmw6k=?="],
