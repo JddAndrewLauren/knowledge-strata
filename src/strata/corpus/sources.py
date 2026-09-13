@@ -38,17 +38,6 @@ from strata import dating, normalizer, refs
 from strata.ledger import Ledger
 from strata.record import Record
 
-# Suffix -> the converter id stored in the ledger and the conversion cache.
-# Two suffixes sharing one converter (.txt, .md) is normalizer.py's choice,
-# not this module's; nothing here re-derives it.
-_CONVERTER_NAMES = {
-    ".txt": "text",
-    ".md": "text",
-    ".docx": "docx",
-    ".pdf": "pdf",
-    ".eml": "eml",
-}
-
 
 @dataclass(frozen=True)
 class Skip:
@@ -85,7 +74,7 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
 
     with _ConversionCache(cache_db) as cache:
         for key, relative, path in units:
-            converter = _CONVERTER_NAMES.get(path.suffix.lower())
+            converter = normalizer.CONVERTER_IDS.get(path.suffix.lower())
             if converter is None:
                 skipped.append(Skip(relative, f"no converter claims the suffix {path.suffix.lower()!r}"))
                 continue
@@ -118,7 +107,16 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
         when = dating.date(dating.RawUnit(path=relative, kind="source", content=content, paragraphs=paragraphs))
         ledger.align(key, sha256, paragraphs, converter=converter, at=at)
         ref = refs.render(refs.SourceRef(ids[key]))
-        records.append(Record(ref=ref, kind="source", date=when, title=title, paragraphs=tuple(paragraphs)))
+        # An empty-Subject email with no body words converts to an empty
+        # title (normalizer.py: #28's "then the ref" fallback); Record
+        # rejects an empty title, so the ref itself stands in for it.
+        records.append(
+            Record(
+                ref=ref, kind="source", date=when,
+                title=title if title.strip() else ref,
+                paragraphs=tuple(paragraphs),
+            )
+        )
 
     live = {key for key, *_ in pending}
     deleted = []
