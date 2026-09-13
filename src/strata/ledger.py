@@ -44,6 +44,32 @@ def _id_number(unit_id: str) -> int:
 
 
 @dataclass(frozen=True)
+class RetiredAnchor:
+    """A retired anchor's parts (CONTEXT.md: retired anchor, retired text),
+    structured rather than a marker/text/pointer string a caller has to
+    split apart: the version it retired at and that version's ``at``, the
+    version it was added at, its exact retired text, and the bare record
+    ref (``ref``) - never the anchor itself, since a retired anchor is never
+    a suggested replacement (ADR-0001).
+
+    ``marker`` and ``pointer`` are the labels :meth:`Ledger.text` composes
+    around the payload; the wording lives here so both share one source.
+    """
+
+    ref: str
+    retired_v: int
+    at: str
+    added_v: int
+    text: str
+
+    def marker(self, canonical: str) -> str:
+        return f"{canonical} - retired at v{self.retired_v} ({self.at}); the v{self.added_v} text it cited:"
+
+    def pointer(self) -> str:
+        return f"The record's current text is {self.ref}."
+
+
+@dataclass(frozen=True)
 class AlignResult:
     """One unit's outcome from :meth:`Ledger.align` or :meth:`Ledger.retire_unit`.
 
@@ -131,7 +157,8 @@ CREATE TABLE IF NOT EXISTS retired_text (
 );
 CREATE TABLE IF NOT EXISTS corpus_revision (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    token INTEGER NOT NULL
+    token INTEGER NOT NULL,
+    dating_version INTEGER
 );
 INSERT OR IGNORE INTO corpus_revision (id, token) VALUES (1, 0);
 """
@@ -144,6 +171,13 @@ class Ledger:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        # The ledger is durable and never dropped (ADR-0001), so a file from
+        # before issue #45 has a corpus_revision table without the column
+        # that CREATE TABLE IF NOT EXISTS above will not add. Add it on open;
+        # it stays NULL until the first sync records the dating version.
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(corpus_revision)")}
+        if "dating_version" not in columns:
+            self._conn.execute("ALTER TABLE corpus_revision ADD COLUMN dating_version INTEGER")
         self._conn.commit()
 
     def close(self) -> None:
@@ -345,13 +379,14 @@ class Ledger:
     def text(self, ref: str) -> str:
         """Live text for a single paragraph anchor, or for a retired one the
         marker, its exact original text and the bare-record pointer (never a
-        suggested replacement)."""
+        suggested replacement). Rebuilt on :meth:`retired_anchor` for the
+        retired case; unchanged return value for existing callers."""
         parsed = refs.parse(ref)
         if not isinstance(parsed, refs.SourceRef) or parsed.anchor is None or parsed.end is not None or parsed.tail:
             raise ValueError(f"text() takes a single paragraph anchor, not {ref!r} - use range() for a span")
         unit_id = parsed.id
         row = self._conn.execute(
-            "SELECT id, added_v, retired_v FROM anchors WHERE unit_id = ? AND p = ?",
+            "SELECT id, retired_v FROM anchors WHERE unit_id = ? AND p = ?",
             (unit_id, parsed.anchor),
         ).fetchone()
         if row is None:
@@ -360,15 +395,35 @@ class Ledger:
             return self._conn.execute(
                 "SELECT text FROM active_text WHERE anchor_id = ?", (row["id"],)
             ).fetchone()["text"]
+        retired = self.retired_anchor(ref)
+        canonical = refs.render(parsed)
+        return f"{retired.marker(canonical)}\n{retired.text}\n{retired.pointer()}"
+
+    def retired_anchor(self, ref: str) -> RetiredAnchor:
+        """The structured parts of one retired paragraph anchor (CONTEXT.md:
+        retired anchor, retired text): the version it retired at and that
+        version's ``at``, the version it was added at, its exact retired
+        text, and the bare record ref - no marker/text/pointer string for a
+        caller to split apart."""
+        parsed = refs.parse(ref)
+        if not isinstance(parsed, refs.SourceRef) or parsed.anchor is None or parsed.end is not None or parsed.tail:
+            raise ValueError(f"retired_anchor() takes a single paragraph anchor, not {ref!r} - use range() for a span")
+        unit_id = parsed.id
+        row = self._conn.execute(
+            "SELECT id, added_v, retired_v FROM anchors WHERE unit_id = ? AND p = ?",
+            (unit_id, parsed.anchor),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no such anchor: {ref}")
+        if row["retired_v"] is None:
+            raise ValueError(f"anchor is still live, not retired: {ref}")
         text = self._conn.execute(
             "SELECT text FROM retired_text WHERE anchor_id = ?", (row["id"],)
         ).fetchone()["text"]
         at = self._conn.execute(
             "SELECT at FROM versions WHERE unit_id = ? AND n = ?", (unit_id, row["retired_v"])
         ).fetchone()["at"]
-        canonical = refs.render(parsed)
-        marker = f"{canonical} - retired at v{row['retired_v']} ({at}); the v{row['added_v']} text it cited:"
-        return f"{marker}\n{text}\nThe record's current text is {unit_id}."
+        return RetiredAnchor(ref=unit_id, retired_v=row["retired_v"], at=at, added_v=row["added_v"], text=text)
 
     def live_anchors(self, unit_id: str) -> list[int]:
         """The current live anchor numbers for ``unit_id``, in document order
@@ -442,6 +497,23 @@ class Ledger:
 
     def _bump_revision(self) -> None:
         self._conn.execute("UPDATE corpus_revision SET token = token + 1 WHERE id = 1")
+
+    # -- dating version --------------------------------------------------
+
+    def dating_version(self) -> int | None:
+        """The dating ruleset version this ledger last aligned under, or
+        ``None`` when it has never recorded one - every ledger from before
+        this feature, and every fresh one (issue #45). The sources adapter
+        reads this to decide whether ``strata.dating.DATING_VERSION`` has
+        moved since the last sync."""
+        row = self._conn.execute("SELECT dating_version FROM corpus_revision WHERE id = 1").fetchone()
+        return row["dating_version"]
+
+    def set_dating_version(self, version: int) -> None:
+        """Record the dating ruleset version just applied, so the next sync
+        can tell whether it has changed."""
+        with self._conn:
+            self._conn.execute("UPDATE corpus_revision SET dating_version = ? WHERE id = 1", (version,))
 
     # -- internals -----------------------------------------------------------
 

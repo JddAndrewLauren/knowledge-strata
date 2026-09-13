@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from strata.normalizer import Conversion, Refusal, normalize
+from strata.normalizer import Conversion, Refusal, decode_text, normalize
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ROOT / "examples" / "west-desk" / "sources"
@@ -101,15 +101,141 @@ def test_thread_index_decodes_to_a_shared_conversation_id_with_the_parent_index_
     assert child.metadata["thread_parent_index"] == parent.metadata["thread_index"]
 
 
-def test_empty_body_has_the_header_paragraph_only_and_a_nonempty_title():
+def test_empty_body_has_the_header_paragraph_only_and_an_empty_title():
+    """The title comes from the body paragraphs alone (#28's "then the ref"
+    fallback never sees paragraph 0, which is never empty); with no body
+    words either, the title is empty here and the sources adapter supplies
+    the ref."""
     conversion = _convert("mail/empty-body.eml")
     assert len(conversion.paragraphs) == 1
-    assert conversion.title
+    assert conversion.title == ""
 
 
 def test_plain_email_title_is_the_subject():
     conversion = _convert("mail/plain.eml")
     assert conversion.title == "Cascade tie congestion report"
+
+
+def test_an_empty_subject_email_with_body_words_titles_from_the_body():
+    raw = (
+        b"From: a@example.com\r\nTo: b@example.com\r\nSubject: \r\n\r\n"
+        b"The tie held through the peak.\r\n"
+    )
+    result = normalize(raw, "mail/x.eml")
+    assert isinstance(result, Conversion)
+    assert result.title == "The tie held through the peak."
+
+
+# --- header paragraph normalization: unfolding, RFC 2047, raw 8-bit, Cc/Date -
+
+
+def _header(raw_bytes: bytes) -> str:
+    result = normalize(raw_bytes, "mail/x.eml")
+    assert isinstance(result, Conversion)
+    return result.paragraphs[0]
+
+
+def test_a_folded_to_header_unfolds_with_no_stray_crlf_and_words_in_order():
+    raw = (
+        b"From: Priya <priya@example.com>\r\n"
+        b"To: Ruth <ruth@example.com>,\r\n"
+        b"\tTomas <tomas@example.com>,\r\n"
+        b" Corinne <corinne@example.com>\r\n"
+        b"Subject: Desk coverage\r\n"
+        b"\r\n"
+        b"Body text.\r\n"
+    )
+    to_line = next(line for line in _header(raw).split("\n") if line.startswith("To:"))
+    assert "\r" not in to_line and "\n" not in to_line
+    assert to_line.index("Ruth") < to_line.index("Tomas") < to_line.index("Corinne")
+
+
+@pytest.mark.parametrize(
+    "encoded_word",
+    ["=?iso-8859-1?Q?caf=E9?=", "=?utf-8?B?Y2Fmw6k=?="],
+    ids=["iso-8859-1-Q", "utf-8-B"],
+)
+def test_an_encoded_word_subject_decodes_the_same_way_for_q_and_b(encoded_word):
+    raw = (
+        f"From: a@example.com\r\nTo: b@example.com\r\nSubject: {encoded_word}\r\n\r\nBody.\r\n"
+    ).encode("ascii")
+    result = normalize(raw, "mail/x.eml")
+    assert isinstance(result, Conversion)
+    assert result.title == "café"
+    assert "Subject: café" in result.paragraphs[0]
+
+
+def test_raw_8bit_from_bytes_decode_to_the_character_with_no_replacement():
+    raw = "From: café <a@example.com>\r\nTo: b@example.com\r\nSubject: x\r\n\r\nBody.\r\n".encode("latin-1")
+    header = _header(raw)
+    assert "café" in header
+    assert "�" not in header
+
+
+def test_no_west_desk_mail_fixture_has_a_cc_line_and_received_only_has_no_date_line():
+    for path in sorted(MAIL.glob("*.eml")):
+        header = _convert(f"mail/{path.name}").paragraphs[0]
+        assert not any(line.startswith("Cc:") for line in header.split("\n")), path.name
+    received_only = _convert("mail/received-only.eml").paragraphs[0]
+    assert not any(line.startswith("Date:") for line in received_only.split("\n"))
+
+
+def test_cc_and_date_appear_in_order_when_both_are_present():
+    raw = (
+        b"From: a@example.com\r\nTo: b@example.com\r\nCc: c@example.com\r\n"
+        b"Date: Wed, 23 May 2001 08:58:33 -0500\r\nSubject: x\r\n\r\nBody.\r\n"
+    )
+    lines = _header(raw).split("\n")
+    names = [line.split(":")[0] for line in lines]
+    assert names == ["From", "To", "Cc", "Date", "Subject"]
+
+
+# --- the shared text decode ---------------------------------------------------
+
+
+def test_only_one_decode_function_is_defined_and_dating_imports_it():
+    import strata.dating as dating_module
+
+    assert not hasattr(dating_module, "_decode")
+    assert dating_module.decode_text is decode_text
+
+
+def test_the_shared_decode_handles_cp1252_and_never_raises_on_any_byte():
+    result = normalize(b"\x93quoted\x94 caf\xe9", "memos/x.txt")
+    assert isinstance(result, Conversion)
+    assert result.paragraphs == ("“quoted” café",)
+    assert decode_text(b"\x93quoted\x94 caf\xe9") == "“quoted” café"
+
+    for byte in range(256):
+        decode_text(bytes([byte]) * 3)  # must not raise
+
+
+# --- the one suffix map --------------------------------------------------------
+
+
+def test_converter_ids_names_exactly_the_suffixes_normalize_accepts():
+    from strata.normalizer import CONVERTER_IDS
+
+    assert CONVERTER_IDS == {".txt": "text", ".md": "text", ".docx": "docx", ".pdf": "pdf", ".eml": "eml"}
+    for suffix in CONVERTER_IDS:
+        result = normalize(b"", f"x{suffix}")
+        if isinstance(result, Refusal):
+            assert "no converter claims" not in result.reason
+
+    unclaimed = normalize(b"whatever", "sources/export.mbox")
+    assert isinstance(unclaimed, Refusal)
+    assert unclaimed.reason == "no converter claims the suffix '.mbox'"
+
+
+# --- issue #45: a hand-bumped version travels in the converter id ----------
+
+
+def test_converter_id_renders_name_at_version_for_every_suffix():
+    from strata.normalizer import CONVERTER_IDS, CONVERTER_VERSIONS, converter_id
+
+    for suffix, name in CONVERTER_IDS.items():
+        assert converter_id(suffix) == f"{name}@{CONVERTER_VERSIONS[name]}"
+    assert converter_id(".mbox") is None
 
 
 # --- the binary-as-text guard ------------------------------------------------

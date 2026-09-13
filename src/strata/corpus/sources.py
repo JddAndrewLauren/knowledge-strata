@@ -22,6 +22,13 @@ advances (CONTEXT.md: a membership change). The path keeps its id, so a
 file that later converts again resumes its unit at a new version.
 
 Never opens an attachment and never writes inside a corpus root.
+
+The converter id in the cache key and passed to ``Ledger.align`` carries its
+hand-bumped version (``eml@1``, :func:`strata.normalizer.converter_id`), so
+bumping it alone misses the cache and re-converts. The ledger remembers the
+dating ruleset version it last aligned under (issue #45); on the one sync
+where :data:`strata.dating.DATING_VERSION` has moved, every unit is passed
+``dated=True`` so it gets a new version without a reconversion.
 """
 
 from __future__ import annotations
@@ -37,17 +44,6 @@ from pathlib import Path
 from strata import dating, normalizer, refs
 from strata.ledger import Ledger
 from strata.record import Record
-
-# Suffix -> the converter id stored in the ledger and the conversion cache.
-# Two suffixes sharing one converter (.txt, .md) is normalizer.py's choice,
-# not this module's; nothing here re-derives it.
-_CONVERTER_NAMES = {
-    ".txt": "text",
-    ".md": "text",
-    ".docx": "docx",
-    ".pdf": "pdf",
-    ".eml": "eml",
-}
 
 
 @dataclass(frozen=True)
@@ -80,12 +76,20 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
     units = _walk(resolved_roots)
     at = datetime.now(timezone.utc).isoformat()
 
+    # A ledger with no stored dating version - never recorded, before this
+    # feature or fresh - treats the current constant as already applied: it
+    # is written below with no unit re-dated. Only a value that has actually
+    # moved forces every unit's dating to count as changed this sync
+    # (CONTEXT.md, "Corpus revision").
+    stored_dating_version = ledger.dating_version()
+    dated = stored_dating_version is not None and stored_dating_version != dating.DATING_VERSION
+
     skipped: list[Skip] = []
     pending: list[tuple[str, str, bytes, str, str, tuple[str, ...], str]] = []
 
     with _ConversionCache(cache_db) as cache:
         for key, relative, path in units:
-            converter = _CONVERTER_NAMES.get(path.suffix.lower())
+            converter = normalizer.converter_id(path.suffix.lower())
             if converter is None:
                 skipped.append(Skip(relative, f"no converter claims the suffix {path.suffix.lower()!r}"))
                 continue
@@ -116,9 +120,18 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
     records = []
     for key, relative, content, sha256, converter, paragraphs, title in pending:
         when = dating.date(dating.RawUnit(path=relative, kind="source", content=content, paragraphs=paragraphs))
-        ledger.align(key, sha256, paragraphs, converter=converter, at=at)
+        ledger.align(key, sha256, paragraphs, converter=converter, at=at, dated=dated)
         ref = refs.render(refs.SourceRef(ids[key]))
-        records.append(Record(ref=ref, kind="source", date=when, title=title, paragraphs=tuple(paragraphs)))
+        # An empty-Subject email with no body words converts to an empty
+        # title (normalizer.py: #28's "then the ref" fallback); Record
+        # rejects an empty title, so the ref itself stands in for it.
+        records.append(
+            Record(
+                ref=ref, kind="source", date=when,
+                title=title if title.strip() else ref,
+                paragraphs=tuple(paragraphs),
+            )
+        )
 
     live = {key for key, *_ in pending}
     deleted = []
@@ -126,6 +139,9 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
         if path not in live and not is_deleted:
             ledger.retire_unit(path, at=at)
             deleted.append(unit_id)
+
+    if stored_dating_version != dating.DATING_VERSION:
+        ledger.set_dating_version(dating.DATING_VERSION)
 
     return SyncReport(records=tuple(records), skipped=tuple(skipped), deleted=tuple(deleted))
 

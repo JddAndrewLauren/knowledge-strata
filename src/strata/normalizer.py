@@ -15,8 +15,10 @@ attribution footer is cut before the quoted-reply splitter runs, which cuts
 ``> `` prefixes at any depth, Outlook's ``-----Original Message-----`` block
 and interleaved quoting (the sender's own lines are kept in order because
 each ``>`` line is dropped where it stands, not by cutting a whole tail).
-From/To/Cc/Date/Subject become the record's first paragraph, verbatim,
-because ``who`` is a text predicate and Record has no participants field.
+From/To/Cc/Date/Subject become the record's first paragraph - unfolded,
+their RFC 2047 encoded words and raw 8-bit bytes decoded, otherwise exactly
+as written - because ``who`` is a text predicate and Record has no
+participants field. Cc and Date are omitted when the header is absent.
 ``Thread-Index`` decodes into converter metadata for a later decision; it is
 never a Record field.
 
@@ -32,6 +34,8 @@ from __future__ import annotations
 import base64
 import binascii
 import email
+import email.errors
+import email.header
 import re
 from dataclasses import dataclass, field
 from email.message import Message
@@ -110,7 +114,11 @@ def normalize(raw_bytes: bytes, path: str) -> Result:
 def decode_text(raw_bytes: bytes) -> str:
     """UTF-8, or cp1252 when the bytes are not UTF-8. Never raises: a unit
     that is not really text at all is a job for the guard below, not an
-    exception."""
+    exception.
+
+    The one decode in the whole codebase: strata.dating imports this same
+    function for raw header values and body text, so a raw byte decodes the
+    same way whether the normalizer or the dating module reads it."""
     try:
         return raw_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -218,17 +226,70 @@ def _convert_pdf(raw_bytes: bytes) -> Result:
 # --- email ---------------------------------------------------------------------
 
 
+# A folded header's continuation: a CRLF immediately followed by whitespace.
+# Unfolding (RFC 5322) removes the CRLF and keeps that whitespace.
+_FOLD = re.compile(r"\r\n(?=[ \t])")
+
+
+def _raw_header(message: Message, name: str) -> str | None:
+    """The first raw value of one header, or ``None`` when it is absent.
+    ``get()`` hands a header carrying raw 8-bit bytes back as an
+    ``email.header.Header`` with the bytes already replaced by U+FFFD, so the
+    raw pair is read instead (the same trick ``dating._headers`` uses): its
+    surrogate escapes are the bytes, put back and decoded through the one
+    shared decode."""
+    for key, value in message.raw_items():
+        if key.lower() == name.lower():
+            return decode_text(value.encode("utf-8", "surrogateescape"))
+    return None
+
+
+def _decode_encoded_words(text: str) -> str:
+    """RFC 2047 encoded words decoded, everything else left as written.
+    Never raises: an unsupported charset or a malformed word decodes through
+    the shared decode instead."""
+    try:
+        parts = email.header.decode_header(text)
+    except (email.errors.HeaderParseError, ValueError):
+        return text
+    decoded = []
+    for chunk, charset in parts:
+        if not isinstance(chunk, bytes):
+            decoded.append(chunk)
+        elif charset:
+            try:
+                decoded.append(chunk.decode(charset))
+            except (LookupError, UnicodeDecodeError):
+                decoded.append(decode_text(chunk))
+        else:
+            decoded.append(decode_text(chunk))
+    return "".join(decoded)
+
+
+def _header_text(message: Message, name: str) -> str | None:
+    """One header's value: unfolded, its encoded words and raw 8-bit bytes
+    decoded, display names kept exactly as written otherwise. ``None`` when
+    the header is absent, so a caller can tell "absent" from "empty"."""
+    raw = _raw_header(message, name)
+    if raw is None:
+        return None
+    return _decode_encoded_words(_FOLD.sub("", raw))
+
+
 def _header_paragraph(message: Message) -> str:
-    """From, To, Cc, Date and Subject, verbatim, as the record's first
-    paragraph: ``who`` is a text predicate and Record has no participants
-    field, and display names are kept exactly as the header wrote them."""
-    lines = [
-        f"From: {message.get('From', '')}",
-        f"To: {message.get('To', '')}",
-        f"Cc: {message.get('Cc', '')}",
-        f"Date: {message.get('Date', '')}",
-        f"Subject: {message.get('Subject', '')}",
-    ]
+    """From, To, Cc, Date and Subject, as the record's first paragraph:
+    ``who`` is a text predicate and Record has no participants field, and
+    display names are kept exactly as the header wrote them. From, To and
+    Subject always get a line; Cc and Date only when that header is present,
+    since no west-desk mail fixture carries an empty one."""
+    lines = [f"From: {_header_text(message, 'From') or ''}", f"To: {_header_text(message, 'To') or ''}"]
+    cc = _header_text(message, "Cc")
+    if cc is not None:
+        lines.append(f"Cc: {cc}")
+    when = _header_text(message, "Date")
+    if when is not None:
+        lines.append(f"Date: {when}")
+    lines.append(f"Subject: {_header_text(message, 'Subject') or ''}")
     return "\n".join(lines)
 
 
@@ -323,8 +384,13 @@ def _convert_eml(raw_bytes: bytes) -> Result:
     if refusal:
         return refusal
 
-    subject = (message.get("Subject") or "").strip()
-    title = subject if subject else first_sentence(paragraphs)
+    subject = (_header_text(message, "Subject") or "").strip()
+    # Paragraph 0 is the header block, never empty, so an empty Subject falls
+    # through to the body's own words rather than #28's "then the ref"
+    # fallback, which can then never apply to email. When the body has none
+    # either, the title is empty here; the sources adapter supplies the ref
+    # (Record rejects an empty title).
+    title = subject if subject else first_sentence(paragraphs[1:])
     return Conversion(paragraphs=tuple(paragraphs), title=title, metadata=_thread_metadata(message))
 
 
@@ -351,10 +417,49 @@ def _guard(text: str, paragraphs: list[str]) -> Refusal | None:
     return None
 
 
-_CONVERTERS = {
-    ".txt": _convert_text,
-    ".md": _convert_text,
-    ".docx": _convert_docx,
-    ".pdf": _convert_pdf,
-    ".eml": _convert_eml,
+# The one suffix map: every other module that needs a suffix's converter id
+# (the sources adapter, for the ledger and the conversion cache) reads this
+# one, so a suffix added here is either claimed with its id or rejected
+# loudly rather than silently falling out of step with a second map.
+CONVERTER_IDS: dict[str, str] = {
+    ".txt": "text",
+    ".md": "text",
+    ".docx": "docx",
+    ".pdf": "pdf",
+    ".eml": "eml",
 }
+
+# Each converter's version, hand-bumped when a fix changes what it produces
+# (CONTEXT.md, "Version"): a source hash would invalidate every cached
+# conversion on a comment edit or refactor, so invalidation is a deliberate
+# constant bump instead, recorded in the diff. Kept beside CONVERTER_IDS,
+# one entry per name, so the two can never drift out of step.
+CONVERTER_VERSIONS: dict[str, int] = {
+    "text": 1,
+    "docx": 1,
+    "pdf": 1,
+    "eml": 1,
+}
+
+
+def converter_id(suffix: str) -> str | None:
+    """The versioned converter id for a suffix (``eml@1``, ASCII, one ``@``,
+    no spaces) - what the sources adapter stores in the conversion cache key
+    and passes to :meth:`strata.ledger.Ledger.align` as ``converter``. A
+    bumped version renders a new id, which misses the cache and produces a
+    new ledger version even when the paragraphs are unchanged. ``None`` when
+    no converter claims the suffix."""
+    name = CONVERTER_IDS.get(suffix)
+    if name is None:
+        return None
+    return f"{name}@{CONVERTER_VERSIONS[name]}"
+
+
+_CONVERTER_FUNCS = {
+    "text": _convert_text,
+    "docx": _convert_docx,
+    "pdf": _convert_pdf,
+    "eml": _convert_eml,
+}
+
+_CONVERTERS = {suffix: _CONVERTER_FUNCS[converter_id] for suffix, converter_id in CONVERTER_IDS.items()}

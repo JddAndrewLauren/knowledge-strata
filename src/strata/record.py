@@ -158,6 +158,16 @@ class Record:
 _SENTENCE_END = re.compile(r"""[.!?]["')\]\u2019\u201d]*(?=\s|$)""")
 
 
+def cap_at_word_boundary(text: str, cap: int = 120) -> str:
+    """Cut ``text`` to at most ``cap`` characters, on a word boundary where
+    one is available (the rule :func:`first_sentence` applies to its own
+    cap, shared with any other display text that needs the same cap)."""
+    if len(text) <= cap:
+        return text
+    cut = text.rfind(" ", 0, cap + 1)
+    return text[:cut] if cut > 0 else text[:cap]
+
+
 def first_sentence(paragraphs, cap: int = 120) -> str:
     """The extractive title of last resort, the same for every kind.
 
@@ -172,8 +182,5 @@ def first_sentence(paragraphs, cap: int = 120) -> str:
         match = _SENTENCE_END.search(text)
         if match:
             text = text[: match.end()]
-        if len(text) > cap:
-            cut = text.rfind(" ", 0, cap + 1)
-            text = text[:cut] if cut > 0 else text[:cap]
-        return text.rstrip()
+        return cap_at_word_boundary(text, cap).rstrip()
     return ""

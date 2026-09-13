@@ -56,7 +56,7 @@ from pathlib import Path, PurePosixPath
 from strata import refs
 from strata.embeddings import Embedder
 from strata.ledger import Ledger
-from strata.record import Date, Record
+from strata.record import Date, Record, cap_at_word_boundary
 
 REPLY_TOKEN_BUDGET = 8_000
 QUERY_HIT_CAP = 100
@@ -75,6 +75,13 @@ class CursorError(ValueError):
 
 class BadRef(ValueError):
     """``read`` was given a ref shape it cannot resolve."""
+
+
+class SemanticUnavailable(RuntimeError):
+    """``semantic=True`` but sqlite-vec cannot be used: either the module is
+    not installed, or this Python's ``sqlite3`` cannot load extensions.
+    Raised at construction rather than degrading silently to lexical-only
+    (``semantic=False`` stays the explicit, caller-chosen way to get that)."""
 
 
 # -- token estimate, dates, periods -----------------------------------------
@@ -185,6 +192,34 @@ def _encode_cursor(payload: dict) -> str:
 
 def _fts_phrase(text: str) -> str:
     return '"' + text.replace('"', '""') + '"'
+
+
+def _fts_expression(query: str) -> str:
+    """A query's lexical branch expression (#46): terms combined with AND,
+    double quotes mark a phrase, an unbalanced quote runs to the end of the
+    query. Each bare term and each quoted run becomes one ``_fts_phrase``, so
+    FTS5 syntax characters (``e-mail``, ``gas*``, ``NOT``, ``(``) are matched
+    literally and never raise. A query of only quotes or whitespace parses to
+    ``""`` - the caller's empty-query browse case. ``who`` stays exact-phrase
+    via ``_fts_phrase`` directly; this function is not used there."""
+    phrases = []
+    i, n = 0, len(query)
+    while i < n:
+        ch = query[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == '"':
+            end = query.find('"', i + 1)
+            content, i = (query[i + 1 : end], end + 1) if end != -1 else (query[i + 1 :], n)
+        else:
+            j = i
+            while j < n and not query[j].isspace() and query[j] != '"':
+                j += 1
+            content, i = query[i:j], j
+        if content.strip():
+            phrases.append(_fts_phrase(content))
+    return " AND ".join(phrases)
 
 
 def _browse_key(row: sqlite3.Row) -> tuple:
@@ -375,7 +410,10 @@ class Hit:
     snippet: str = ""
 
     def line(self) -> str:
-        head = f"{self.ref}  {display_date(self.date)}  {self.kind}  {self.title}"
+        # The title is capped on display only: the stored title, title_fts
+        # and the who expansion keep the full title (issue #42).
+        title = cap_at_word_boundary(self.title)
+        head = f"{self.ref}  {display_date(self.date)}  {self.kind}  {title}"
         if self.matches > 1:
             head += f"  ({self.matches} matches)"
         return head if not self.snippet else f"{head}\n    {self.snippet}"
@@ -631,10 +669,11 @@ class Index:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
-        # `semantic=False` degrades to lexical-only, same as no vec0 build
-        # (python-stack.md ss2's VectorExtensionUnavailable path) - useful to
-        # a caller and to tests isolating lexical behaviour from the
-        # always-on top-200 semantic branch.
+        # `semantic=False` is the caller's own choice of lexical-only, useful
+        # to a caller and to tests isolating lexical behaviour from the
+        # always-on top-200 semantic branch. `semantic=True` with no usable
+        # sqlite-vec is not the same thing: `_load_vec` raises rather than
+        # degrading silently (issue #42).
         self._vec_ok = self._load_vec() if semantic else False
         if is_new:
             self._set_meta("epoch", os.urandom(8).hex())
@@ -650,14 +689,20 @@ class Index:
     def _load_vec(self) -> bool:
         try:
             import sqlite_vec
-        except ImportError:
-            return False
+        except ImportError as error:
+            raise SemanticUnavailable(
+                "semantic=True needs sqlite-vec, which is not installed "
+                "(pass semantic=False for lexical-only)"
+            ) from error
         try:
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
             self._conn.enable_load_extension(False)
-        except (AttributeError, sqlite3.NotSupportedError, sqlite3.OperationalError):
-            return False
+        except (AttributeError, sqlite3.NotSupportedError, sqlite3.OperationalError) as error:
+            raise SemanticUnavailable(
+                "semantic=True needs sqlite-vec, but this Python's sqlite3 "
+                f"could not load it as an extension ({error})"
+            ) from error
         return True
 
     def _vec_table_ready(self) -> bool:
@@ -928,12 +973,14 @@ class Index:
     # -- hybrid query evidence -------------------------------------------------
 
     def _lexical_paragraph_rows(self, query: str) -> list[sqlite3.Row]:
-        phrase = _fts_phrase(query)
+        expression = _fts_expression(query)
+        if not expression:
+            return []
         return self._conn.execute(
             "SELECT p.id AS id, p.ref AS ref, p.idx AS idx FROM paragraph_fts "
             "JOIN paragraphs p ON p.id = paragraph_fts.rowid "
             "WHERE paragraph_fts MATCH ? ORDER BY bm25(paragraph_fts), p.ref, p.idx",
-            (phrase,),
+            (expression,),
         ).fetchall()
 
     def _semantic_paragraph_ids(
@@ -1033,11 +1080,11 @@ class Index:
 
     def _snippet(self, query: str, paragraph_id: int, is_lexical: bool, text: str) -> str:
         if is_lexical:
-            phrase = _fts_phrase(query)
+            expression = _fts_expression(query)
             row = self._conn.execute(
                 "SELECT snippet(paragraph_fts, 0, '', '', '...', 32) AS s "
                 "FROM paragraph_fts WHERE rowid = ? AND paragraph_fts MATCH ?",
-                (paragraph_id, phrase),
+                (paragraph_id, expression),
             ).fetchone()
             if row is not None:
                 return row["s"]
@@ -1091,7 +1138,7 @@ class Index:
         eligible = self._eligible_refs(from_=from_, to=to, who_matches=who_matches, kind=kind)
         record_rows = {row["ref"]: row for row in self._all_record_rows() if row["ref"] in eligible}
 
-        if query:
+        if _fts_expression(query):
             evidence = self._query_evidence(
                 query, eligible, from_=from_, to=to, kind=kind, who_matches=who_matches
             )
@@ -1179,15 +1226,16 @@ class Index:
 
         candidate = build(hit_specs_page, month_page, covered_page, chunks_page)
         # The normal page (already capped at 100/500 per list) usually fits
-        # in one render; only an oversized item (a very long title, or many
-        # long rows) needs trimming - shrink whichever list is currently
-        # largest until it fits, so every list still advances rather than
-        # a ref becoming unreachable (acceptance #22 test 3). If only one
-        # item remains and it still does not fit, it is forced through
-        # rather than silently dropped.
+        # in one render; only an oversized item (many long rows) needs
+        # trimming - shrink whichever list is currently largest until it
+        # fits, so every list still advances rather than a ref becoming
+        # unreachable (acceptance #22 test 3). A hit's title is capped for
+        # display (Hit.line), so a hit can no longer be the oversized item;
+        # nothing is ever sent over budget, so the loop pops all the way to
+        # nothing rather than force a failing candidate through.
         while not fits(candidate):
             pages = {"month": month_page, "covered": covered_page, "chunks": chunks_page, "hits": hit_specs_page}
-            if sum(len(page) for page in pages.values()) <= 1:
+            if not any(pages.values()):
                 break
             name = max(pages, key=lambda key: len(pages[key]))
             pages[name].pop()
@@ -1424,15 +1472,13 @@ class Index:
                 return labels + [result], []
             return labels, [(citation(p), text) for p, text in result]
         # A single paragraph anchor, live or retired, straight from the ledger.
-        text = self._ledger.text(canonical)
         if parsed.anchor in self._ledger.live_anchors(parsed.id):
-            return labels, [(canonical, text)]
-        # Retired: the ledger composes its marker, the exact text and the
-        # pointer as three parts on their own lines (ADR-0001, Ledger.text);
-        # the marker and pointer are labels, only the exact text is payload.
-        marker, _, rest = text.partition("\n")
-        exact_text, _, pointer = rest.rpartition("\n")
-        return labels + [marker, pointer], [(canonical, exact_text)]
+            return labels, [(canonical, self._ledger.text(canonical))]
+        # Retired: the ledger's structured accessor gives the exact retired
+        # text apart from the marker and pointer labels (ADR-0001), so
+        # neither is ever split out of a composed string.
+        retired = self._ledger.retired_anchor(canonical)
+        return labels + [retired.marker(canonical), retired.pointer()], [(canonical, retired.text)]
 
     def _read_header_line(self, canonical: str, record_row: sqlite3.Row) -> str:
         date = self._record_date(record_row)

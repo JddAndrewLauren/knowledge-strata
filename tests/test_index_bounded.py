@@ -16,6 +16,7 @@ import pytest
 from strata.embeddings import FakeEmbedder
 from strata.index import PARAGRAPH_SEPARATOR, REPLY_TOKEN_BUDGET, Index, estimate_tokens
 from strata.ledger import Ledger
+from strata.record import cap_at_word_boundary
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import make_fixtures as fx  # noqa: E402
@@ -28,6 +29,22 @@ def ledger(tmp_path):
     led = Ledger(tmp_path / "ledger.db")
     yield led
     led.close()
+
+
+@pytest.fixture(autouse=True)
+def _every_search_reply_stays_within_budget(monkeypatch):
+    """Acceptance (issue #42): the fit loop has no branch that sends a
+    candidate reply that failed its own budget check - checked here for
+    every reply this file produces, with no tolerance, rather than only the
+    ones each test happens to assert on."""
+    original = Index.search
+
+    def guarded(self, *args, **kwargs):
+        reply = original(self, *args, **kwargs)
+        assert estimate_tokens(reply.text()) <= REPLY_TOKEN_BUDGET
+        return reply
+
+    monkeypatch.setattr(Index, "search", guarded)
 
 
 def lexical_index(tmp_path, ledger, **kwargs):
@@ -80,6 +97,36 @@ def test_long_titles_keep_the_reply_bounded_and_still_enumerate(tmp_path, ledger
     assert estimate_tokens(first.text()) <= REPLY_TOKEN_BUDGET
     hits = _drain(index, first)
     assert len(set(h.ref for h in hits)) == 20
+
+
+def test_a_60000_char_title_hit_stays_bounded_and_capped_on_a_word_boundary(tmp_path, ledger):
+    index = lexical_index(tmp_path, ledger)
+    long_title = " ".join(f"word{i}" for i in range(12_000))
+    assert len(long_title) > 60_000
+    rec = make_source(ledger, "a.txt", ["Some content about the desk."], date=exact("2001-06-01"), title=long_title)
+    index.sync([rec])
+
+    reply = index.search()
+    assert estimate_tokens(reply.text()) <= REPLY_TOKEN_BUDGET
+    assert [h.ref for h in reply.hits] == [rec.ref]  # the hit is still returned
+
+    hit = reply.hits[0]
+    line_title = hit.line().split("  ")[3]
+    assert len(line_title) <= 120
+    assert line_title == cap_at_word_boundary(long_title)
+
+
+def test_full_title_stays_stored_and_searchable_past_the_display_cap(tmp_path, ledger):
+    index = lexical_index(tmp_path, ledger)
+    long_title = "Intro " + "filler " * 3000 + "uniquetail"
+    rec = make_source(ledger, "a.txt", [long_title], date=exact("2001-06-01"), title=long_title)
+    index.sync([rec])
+
+    stored = index._conn.execute("SELECT title FROM records WHERE ref = ?", (rec.ref,)).fetchone()["title"]
+    assert stored == long_title  # the cap is on display only
+
+    reply = index.search("uniquetail")  # past character 120 of the title
+    assert [h.ref for h in reply.hits] == [f"{rec.ref} p1"]
 
 
 def test_a_long_month_list_pages_within_budget(tmp_path, ledger):

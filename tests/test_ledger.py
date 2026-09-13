@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from strata.ledger import AlignResult, Ledger, _match_paragraphs
+from strata.ledger import AlignResult, Ledger, RetiredAnchor, _match_paragraphs
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -154,6 +154,37 @@ def test_retired_anchor_reads_back_after_cache_removal_raw_change_and_raw_remova
         ledger.close()
 
 
+def test_retired_anchor_returns_structured_fields_for_awkward_retired_text(ledger):
+    """Issue #42 N3: the accessor's fields, not a marker/text/pointer string
+    a caller has to split - even when the retired text itself contains
+    newlines, a CRLF pair, leading/trailing blank lines and a line that
+    reads exactly like the pointer sentence."""
+    tricky = "\r\nFirst line.\nSecond line, with a trailing newline.\nThe record's current text is SRC-000099.\n"
+    ledger.register(["sources/x.txt"])
+    ledger.align("sources/x.txt", "h1", [tricky, "kept"], converter="text", at="d1")
+    ledger.align("sources/x.txt", "h2", ["kept"], converter="text", at="d2")  # p1 retires
+
+    retired = ledger.retired_anchor("SRC-000001 p1")
+    assert retired == RetiredAnchor(ref="SRC-000001", retired_v=2, at="d2", added_v=1, text=tricky)
+
+    # marker() and pointer() carry the same wording ledger.text() composes,
+    # and the retired text passes through as the payload, unsplit.
+    assert retired.marker("SRC-000001 p1") == "SRC-000001 p1 - retired at v2 (d2); the v1 text it cited:"
+    assert retired.pointer() == "The record's current text is SRC-000001."
+    assert ledger.text("SRC-000001 p1") == (
+        f"{retired.marker('SRC-000001 p1')}\n{tricky}\n{retired.pointer()}"
+    )
+
+
+def test_retired_anchor_refuses_a_live_anchor_or_a_missing_one(ledger):
+    ledger.register(["sources/x.txt"])
+    ledger.align("sources/x.txt", "h", ["one"], converter="text", at="d")
+    with pytest.raises(ValueError):
+        ledger.retired_anchor("SRC-000001 p1")  # still live
+    with pytest.raises(ValueError):
+        ledger.retired_anchor("SRC-000001 p99")  # never existed
+
+
 # -- atomicity: acceptance #22 test 3 ---------------------------------------
 
 
@@ -284,6 +315,17 @@ def test_corpus_revision_advances_on_content_deletion_converter_and_dating_chang
 
 
 # -- the alignment helper in isolation --------------------------------------
+
+
+# -- dating version: issue #45 ------------------------------------------
+
+
+def test_dating_version_starts_unset_and_persists_once_recorded(ledger):
+    assert ledger.dating_version() is None
+    ledger.set_dating_version(1)
+    assert ledger.dating_version() == 1
+    ledger.set_dating_version(2)
+    assert ledger.dating_version() == 2
 
 
 def test_match_paragraphs_pairs_equal_duplicates_in_document_order():
