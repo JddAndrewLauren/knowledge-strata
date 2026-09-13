@@ -1432,6 +1432,12 @@ class Index:
         # headroom for the continuation and reply_tokens lines.
         labels_bytes = sum(len(label.encode("utf-8")) + 1 for label in labels)
         budget_bytes = REPLY_TOKEN_BUDGET * 4 - labels_bytes - 400
+        if budget_bytes <= 0:
+            # The header cap (issue #52) keeps this from happening for an
+            # oversized title; refuse loudly rather than fall back to
+            # _minimum_cut's one-character pages if some other label ever
+            # crowds out the budget.
+            raise ValueError(f"labels for {ref!r} leave no room for body text: budget_bytes={budget_bytes}")
         pieces, next_off = _paginate(units, start_para, start_char, budget_bytes)
         continuation = None
         if next_off is not None:
@@ -1481,8 +1487,11 @@ class Index:
         return labels + [retired.marker(canonical), retired.pointer()], [(canonical, retired.text)]
 
     def _read_header_line(self, canonical: str, record_row: sqlite3.Row) -> str:
+        # The title is capped on display only, the same word-boundary cap as
+        # Hit.line (issue #52); the stored title stays full and searchable.
         date = self._record_date(record_row)
-        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {record_row['title']}"
+        title = cap_at_word_boundary(record_row["title"])
+        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {title}"
 
     def _paragraph_texts(self, ref: str) -> list[str]:
         rows = self._conn.execute("SELECT text FROM paragraphs WHERE ref = ? ORDER BY idx", (ref,)).fetchall()
