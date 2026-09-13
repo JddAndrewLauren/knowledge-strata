@@ -1,5 +1,5 @@
 """The manuscript adapter: heading sections, occurrence suffixes, dating
-by chapter, refusing non-markdown files (issue #29).
+by chapter, skipping non-markdown files and dotfiles (issue #29).
 """
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from strata.corpus.manuscript import Refusal, read
+from strata.corpus.manuscript import Skip, read
 from strata.record import Record
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +23,7 @@ def _by_ref(records: tuple[Record, ...]) -> dict[str, Record]:
 
 def test_west_desk_yields_the_file_record_and_every_section_record():
     walk = read(MANUSCRIPT)
-    assert walk.refusals == ()
+    assert walk.skipped == ()
     by_ref = _by_ref(walk.records)
     expected = {
         "manuscript/ch01-the-desk.md",
@@ -93,10 +93,10 @@ def test_every_record_from_one_chapter_shares_its_date():
     assert len(set(dates.values())) == 1
 
 
-# --- refusal: non-markdown, walk continues ----------------------------------
+# --- skip: non-markdown, walk continues -------------------------------------
 
 
-def test_a_non_markdown_file_is_refused_and_the_walk_continues(tmp_path):
+def test_a_non_markdown_file_is_skipped_with_a_reason_and_the_walk_continues(tmp_path):
     folder = tmp_path / "manuscript"
     folder.mkdir()
     (folder / "ch01.md").write_text("# One\n\nBody text.\n", encoding="utf-8")
@@ -104,10 +104,23 @@ def test_a_non_markdown_file_is_refused_and_the_walk_continues(tmp_path):
 
     walk = read(folder)
 
-    assert walk.refusals == (Refusal("manuscript/ch02-scrivener-export.docx", walk.refusals[0].reason),)
-    assert "docx" in walk.refusals[0].reason
+    assert walk.skipped == (Skip("manuscript/ch02-scrivener-export.docx", walk.skipped[0].reason),)
+    assert "docx" in walk.skipped[0].reason
     by_ref = _by_ref(walk.records)
     assert "manuscript/ch01.md" in by_ref
+
+
+def test_dotfiles_are_skipped_silently_like_the_sources_adapter(tmp_path):
+    folder = tmp_path / "manuscript"
+    (folder / ".obsidian").mkdir(parents=True)
+    (folder / "ch01.md").write_text("# One\n\nBody text.\n", encoding="utf-8")
+    (folder / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (folder / ".obsidian" / "workspace.md").write_text("# Not a chapter\n", encoding="utf-8")
+
+    walk = read(folder)
+
+    assert walk.skipped == ()
+    assert set(_by_ref(walk.records)) == {"manuscript/ch01.md", "manuscript/ch01.md # One"}
 
 
 # --- the generated oversized section converts with its text intact ---------
@@ -117,7 +130,7 @@ def test_the_generated_oversized_section_keeps_its_text_intact(tmp_path):
     make_fixtures.scale_oversized(tmp_path)
     big = make_fixtures.oversized_paragraph()
     walk = read(tmp_path / "manuscript")
-    assert walk.refusals == ()
+    assert walk.skipped == ()
     by_ref = _by_ref(walk.records)
     section = by_ref["manuscript/ch99-oversized.md # The long week"]
     # split_paragraphs strips surrounding whitespace, like every other converter;

@@ -19,6 +19,11 @@ Record fields apply.
 **Version** - a conversion of a raw unit. A changed file or a bumped converter
 produces version n+1; refs do not carry a version, and resolve against the newest.
 
+**Skip** - a file an adapter walked but made no Record from, with the reason:
+refused by the normalizer, no text produced, not the adapter's kind of file.
+Reported, never raised; a walk never aborts on one. Dotfiles are not skips -
+every adapter passes over them silently.
+
 ## Refs
 
 **Ref** - the string that addresses something readable. Two shapes, decided by

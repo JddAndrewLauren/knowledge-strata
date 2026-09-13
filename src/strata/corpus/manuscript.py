@@ -8,8 +8,9 @@ subheadings included, so a repeated heading text (``Morning``, ``Morning
 a Record, whose paragraphs are the whole file. Dating runs once per file -
 manuscript chapters run only the first-line and path rungs (CONTEXT.md,
 "Dating strategy") - and every Record from that file shares its date; there
-is no finer-grained dating than the chapter. A file that is not markdown
-(docx, a Scrivener export) is refused with a reason; the walk never aborts.
+is no finer-grained dating than the chapter. Dotfiles are skipped silently,
+as the sources adapter skips them. A file that is not markdown (docx, a
+Scrivener export) is a ``Skip`` with a reason; the walk never aborts.
 """
 
 from __future__ import annotations
@@ -26,38 +27,42 @@ _SECTION_DEPTHS = (1, 2)
 
 
 @dataclass(frozen=True)
-class Refusal:
-    """A manuscript file the adapter will not convert, and why."""
+class Skip:
+    """A manuscript file that produced no Record, and why (CONTEXT.md,
+    "Skip"): not markdown, or refused by the normalizer."""
 
     ref: str
     reason: str
 
 
 @dataclass(frozen=True)
-class Walk:
+class ReadReport:
     """One folder's outcome: Records in file, then document, order, plus
-    every refused file - the walk never aborts on one."""
+    every skipped file - the walk never aborts on one."""
 
     records: tuple[Record, ...]
-    refusals: tuple[Refusal, ...]
+    skipped: tuple[Skip, ...]
 
 
-def read(folder: str | Path) -> Walk:
+def read(folder: str | Path) -> ReadReport:
     folder = Path(folder)
     records: list[Record] = []
-    refusals: list[Refusal] = []
+    skipped: list[Skip] = []
     for path in sorted(p for p in folder.rglob("*") if p.is_file()):
-        ref_path = refs.render(refs.PathRef("manuscript/" + path.relative_to(folder).as_posix()))
+        relative = path.relative_to(folder)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        ref_path = refs.render(refs.PathRef("manuscript/" + relative.as_posix()))
         if path.suffix.lower() != ".md":
-            refusals.append(Refusal(ref_path, f"not a markdown manuscript: {path.suffix or '(no extension)'}"))
+            skipped.append(Skip(ref_path, f"not a markdown manuscript: {path.suffix or '(no extension)'}"))
             continue
         raw_bytes = path.read_bytes()
         result = normalizer.normalize(raw_bytes, ref_path)
         if isinstance(result, normalizer.Refusal):
-            refusals.append(Refusal(ref_path, result.reason))
+            skipped.append(Skip(ref_path, result.reason))
             continue
         records.extend(_records_for_file(ref_path, raw_bytes, result))
-    return Walk(tuple(records), tuple(refusals))
+    return ReadReport(tuple(records), tuple(skipped))
 
 
 def _records_for_file(ref_path: str, raw_bytes: bytes, conversion: normalizer.Conversion) -> list[Record]:
