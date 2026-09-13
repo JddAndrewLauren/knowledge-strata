@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS corpus_revision (
     token INTEGER NOT NULL,
     dating_version INTEGER
 );
-INSERT OR IGNORE INTO corpus_revision (id, token, dating_version) VALUES (1, 0, NULL);
+INSERT OR IGNORE INTO corpus_revision (id, token) VALUES (1, 0);
 """
 
 
@@ -171,6 +171,13 @@ class Ledger:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        # The ledger is durable and never dropped (ADR-0001), so a file from
+        # before issue #45 has a corpus_revision table without the column
+        # that CREATE TABLE IF NOT EXISTS above will not add. Add it on open;
+        # it stays NULL until the first sync records the dating version.
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(corpus_revision)")}
+        if "dating_version" not in columns:
+            self._conn.execute("ALTER TABLE corpus_revision ADD COLUMN dating_version INTEGER")
         self._conn.commit()
 
     def close(self) -> None:

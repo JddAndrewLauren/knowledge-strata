@@ -446,15 +446,43 @@ def test_a_fresh_or_pre_upgrade_ledger_versions_nothing_extra_on_its_first_sync(
     assert all(n == 1 for n in versions_before.values())
     assert ledger.dating_version() == dating.DATING_VERSION
 
-    # A ledger "from before this change" looks the same: the column exists
-    # but was never populated by older code. Simulated by clearing it back
-    # to NULL after an ordinary sync has already registered every unit.
-    ledger._conn.execute("UPDATE corpus_revision SET dating_version = NULL WHERE id = 1")
-    ledger._conn.commit()
+    # A ledger "from before this change" is a real file whose corpus_revision
+    # table has no dating_version column at all (the schema before #45).
+    # Rebuilt the SQLite way - a copy of the table without the column, then
+    # a swap - so the file is exactly what an older commit left behind.
     revision = ledger.corpus_revision()
+    ledger.close()
+    _downgrade_corpus_revision_table(tmp_path / "ledger.db")
+
+    ledger = Ledger(tmp_path / "ledger.db")  # must open, not raise
+    assert ledger.dating_version() is None
+    assert ledger.corpus_revision() == revision
 
     sources.sync([SOURCES], ledger, cache_db=cache_db)
     for ref, before in versions_before.items():
-        assert ledger._last_version(ref) == before  # no version bump from the reset alone
+        assert ledger._last_version(ref) == before  # no version bump from the upgrade alone
     assert ledger.corpus_revision() == revision  # no revision advance either
     assert ledger.dating_version() == dating.DATING_VERSION
+
+
+def _downgrade_corpus_revision_table(path: Path) -> None:
+    """Rewrite ``corpus_revision`` as the pre-#45 schema (``id``, ``token``
+    only), keeping its token."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    with conn:
+        conn.executescript(
+            """
+            CREATE TABLE corpus_revision_old (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                token INTEGER NOT NULL
+            );
+            INSERT INTO corpus_revision_old (id, token) SELECT id, token FROM corpus_revision;
+            DROP TABLE corpus_revision;
+            ALTER TABLE corpus_revision_old RENAME TO corpus_revision;
+            """
+        )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(corpus_revision)")}
+    conn.close()
+    assert columns == {"id", "token"}
