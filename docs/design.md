@@ -271,7 +271,8 @@ boundaries within a paragraph. Fragments preserve every character, punctuation,
 capital and whitespace; concatenating payloads and their preserved separators
 exactly reconstructs the selected stored text. Transport labels are separate
 from text payloads. Cursors retain the selection, document order and offset;
-source anchors remain citations, cursors never are.
+source anchors remain citations, cursors never are. The header's title label
+is capped at the same word-boundary length as a hit's title, display only.
 
 **Revisions.** Every cursor identifies an index revision. Any change to that
 revision, including note edits or a cache rebuild, explicitly invalidates it;

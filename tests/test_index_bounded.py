@@ -246,6 +246,62 @@ def test_an_oversized_retired_paragraph_pages_exactly(tmp_path, ledger):
     assert any("retired at v2" in label for label in pages[0].labels)
 
 
+def test_a_60000_char_title_read_stays_bounded_with_the_same_page_count_as_a_short_title(tmp_path, ledger):
+    """Acceptance (issue #52): the read header no longer renders the whole
+    stored title, so an oversized title can't drive budget_bytes negative
+    and force _minimum_cut's one-character pages."""
+    index = lexical_index(tmp_path, ledger)
+    long_title = " ".join(f"word{i}" for i in range(12_000))
+    assert len(long_title) > 60_000
+    big = _awkward_text()
+    long = make_source(ledger, "long.txt", ["Intro.", big, "Outro."], date=exact("2001-06-01"), title=long_title)
+    short = make_source(ledger, "short.txt", ["Intro.", big, "Outro."], date=exact("2001-06-01"), title="Short title")
+    index.sync([long, short])
+
+    long_pages, long_body = _read_pages(index, long.ref)
+    short_pages, short_body = _read_pages(index, short.ref)
+
+    expected_body = "Intro." + PARAGRAPH_SEPARATOR + big + PARAGRAPH_SEPARATOR + "Outro."
+    assert long_body == short_body == expected_body
+    assert len(long_pages[0].body) > 1  # not a one-character _minimum_cut fallback
+    assert len(long_pages) == len(short_pages)
+
+
+def test_read_header_caps_the_title_at_the_same_word_boundary_as_hit_line(tmp_path, ledger):
+    index = lexical_index(tmp_path, ledger)
+    long_title = "Intro " + "filler " * 3000 + "uniquetail"
+    # The body carries the same text as the title so a word past the display
+    # cap stays independently verifiable as searchable (mirrors #42's
+    # test_full_title_stays_stored_and_searchable_past_the_display_cap).
+    rec = make_source(ledger, "a.txt", [long_title], date=exact("2001-06-01"), title=long_title)
+    index.sync([rec])
+
+    reply = index.read(rec.ref)
+    header_title = reply.labels[0].split("  ")[3]
+    assert header_title == cap_at_word_boundary(long_title)
+    assert "uniquetail" not in header_title  # past the cap
+
+    hit = index.search().hits[0]
+    assert hit.line().split("  ")[3] == header_title  # same cap, same boundary as Hit.line
+
+    stored = index._conn.execute("SELECT title FROM records WHERE ref = ?", (rec.ref,)).fetchone()["title"]
+    assert stored == long_title  # the cap is on display only
+
+    past_the_cap = index.search("uniquetail")
+    assert [h.ref for h in past_the_cap.hits] == [f"{rec.ref} p1"]  # still searchable
+
+
+def test_read_raises_loudly_when_labels_leave_no_room_for_body_text(tmp_path, ledger):
+    """Acceptance (issue #52): budget_bytes can no longer go negative and
+    silently degrade to one-character pages; a label set the title cap
+    doesn't reach (here, an oversized warning) raises instead."""
+    index = lexical_index(tmp_path, ledger)
+    note = make_note("notes/theme/big.md", ["Body."], type="theme", warnings=("W" * 40_000,))
+    index.sync([note])
+    with pytest.raises(ValueError, match="budget_bytes"):
+        index.read(note.ref)
+
+
 def test_a_long_covered_list_pages_within_budget(tmp_path, ledger):
     index = lexical_index(tmp_path, ledger, chunk_tokens=80_000)
     src = make_source(ledger, "a.txt", ["Content."], date=exact("2001-06-01"))
