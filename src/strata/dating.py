@@ -39,6 +39,13 @@ from strata.record import KINDS, Date, Kind
 
 UNKNOWN = Date("", "unknown", "day", "")
 
+# The dating ruleset's version, hand-bumped when a strategy's rules change
+# enough that already-dated units deserve a fresh date (CONTEXT.md, "Corpus
+# revision"). The ledger remembers the version it last aligned under; the
+# sources adapter passes ``dated=True`` to every unit on the one sync where
+# the two differ, then the ledger records the new value.
+DATING_VERSION = 1
+
 # --------------------------------------------------------------------------
 # The raw unit
 # --------------------------------------------------------------------------

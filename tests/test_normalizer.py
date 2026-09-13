@@ -222,6 +222,17 @@ def test_converter_ids_names_exactly_the_suffixes_normalize_accepts():
         if isinstance(result, Refusal):
             assert "no converter claims" not in result.reason
 
+
+# --- issue #45: a hand-bumped version travels in the converter id ----------
+
+
+def test_converter_id_renders_name_at_version_for_every_suffix():
+    from strata.normalizer import CONVERTER_IDS, CONVERTER_VERSIONS, converter_id
+
+    for suffix, name in CONVERTER_IDS.items():
+        assert converter_id(suffix) == f"{name}@{CONVERTER_VERSIONS[name]}"
+    assert converter_id(".mbox") is None
+
     unclaimed = normalize(b"whatever", "sources/export.mbox")
     assert isinstance(unclaimed, Refusal)
     assert unclaimed.reason == "no converter claims the suffix '.mbox'"

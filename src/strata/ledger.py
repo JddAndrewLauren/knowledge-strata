@@ -157,9 +157,10 @@ CREATE TABLE IF NOT EXISTS retired_text (
 );
 CREATE TABLE IF NOT EXISTS corpus_revision (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    token INTEGER NOT NULL
+    token INTEGER NOT NULL,
+    dating_version INTEGER
 );
-INSERT OR IGNORE INTO corpus_revision (id, token) VALUES (1, 0);
+INSERT OR IGNORE INTO corpus_revision (id, token, dating_version) VALUES (1, 0, NULL);
 """
 
 
@@ -489,6 +490,23 @@ class Ledger:
 
     def _bump_revision(self) -> None:
         self._conn.execute("UPDATE corpus_revision SET token = token + 1 WHERE id = 1")
+
+    # -- dating version --------------------------------------------------
+
+    def dating_version(self) -> int | None:
+        """The dating ruleset version this ledger last aligned under, or
+        ``None`` when it has never recorded one - every ledger from before
+        this feature, and every fresh one (issue #45). The sources adapter
+        reads this to decide whether ``strata.dating.DATING_VERSION`` has
+        moved since the last sync."""
+        row = self._conn.execute("SELECT dating_version FROM corpus_revision WHERE id = 1").fetchone()
+        return row["dating_version"]
+
+    def set_dating_version(self, version: int) -> None:
+        """Record the dating ruleset version just applied, so the next sync
+        can tell whether it has changed."""
+        with self._conn:
+            self._conn.execute("UPDATE corpus_revision SET dating_version = ? WHERE id = 1", (version,))
 
     # -- internals -----------------------------------------------------------
 

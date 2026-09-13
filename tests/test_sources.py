@@ -328,3 +328,133 @@ def test_an_unclaimed_suffixs_skip_reason_is_unchanged(tmp_path):
     ledger = Ledger(tmp_path / "ledger.db")
     report = sources.sync([corpus], ledger, cache_db=tmp_path / "store.db")
     assert report.skipped == (sources.Skip("export.mbox", "no converter claims the suffix '.mbox'"),)
+
+
+# -- issue #45: the versioned converter id lands in versions.converter ------
+
+
+def test_the_versioned_converter_id_lands_in_versions_converter(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    sources.sync([SOURCES], ledger, cache_db=tmp_path / "store.db")
+    units = ledger.known_units()
+
+    seen_suffixes = set()
+    for path, (unit_id, _) in units.items():
+        suffix = Path(path).suffix.lower()
+        name = sources.normalizer.CONVERTER_IDS.get(suffix)
+        if name is None:
+            continue
+        n = ledger._last_version(unit_id)
+        row = ledger._conn.execute(
+            "SELECT converter FROM versions WHERE unit_id = ? AND n = ?", (unit_id, n)
+        ).fetchone()
+        assert row["converter"] == f"{name}@{sources.normalizer.CONVERTER_VERSIONS[name]}"
+        seen_suffixes.add(suffix)
+    assert seen_suffixes == {".txt", ".docx", ".pdf", ".eml"}  # west-desk carries no .md
+
+
+# -- issue #45: bumping a converter version reconverts only its own units ---
+
+
+def test_bumping_a_converter_version_reconverts_only_that_converters_units(tmp_path, monkeypatch):
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+    revision = ledger.corpus_revision()
+    units = ledger.known_units()
+
+    versions_before = {unit_id: ledger._last_version(unit_id) for _, (unit_id, _) in units.items()}
+    anchors_before = {unit_id: ledger.live_anchors(unit_id) for _, (unit_id, _) in units.items()}
+    expected_reconverted = {
+        str(p.relative_to(SOURCES)).replace("\\", "/") for p in SOURCES.rglob("*.txt") if p.is_file()
+    }
+
+    calls: list[str] = []
+    real_normalize = sources.normalizer.normalize
+
+    def spying_normalize(raw_bytes, path):
+        calls.append(path)
+        return real_normalize(raw_bytes, path)
+
+    monkeypatch.setattr(sources.normalizer, "normalize", spying_normalize)
+    monkeypatch.setitem(
+        sources.normalizer.CONVERTER_VERSIONS, "text", sources.normalizer.CONVERTER_VERSIONS["text"] + 1
+    )
+
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+
+    assert set(calls) == expected_reconverted  # only .txt units re-converted; others served from cache
+
+    for path, (unit_id, _) in units.items():
+        if path.endswith(".txt"):
+            assert ledger._last_version(unit_id) == versions_before[unit_id] + 1  # re-versioned
+        else:
+            assert ledger._last_version(unit_id) == versions_before[unit_id]  # untouched
+        # Unchanged paragraphs keep their exact anchor numbers; nothing retires.
+        assert ledger.live_anchors(unit_id) == anchors_before[unit_id]
+
+    assert ledger.corpus_revision() != revision
+
+
+# -- issue #45: bumping the dating version re-versions everything, no reconvert -
+
+
+def test_bumping_the_dating_version_re_versions_every_unit_without_reconverting(tmp_path, monkeypatch):
+    from strata import dating
+
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+    units = ledger.known_units()
+    versions_before = {unit_id: ledger._last_version(unit_id) for _, (unit_id, _) in units.items()}
+    anchors_before = {unit_id: ledger.live_anchors(unit_id) for _, (unit_id, _) in units.items()}
+    revision = ledger.corpus_revision()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("normalizer.normalize() must not run on a dating-only bump")
+
+    monkeypatch.setattr(sources.normalizer, "normalize", boom)
+    monkeypatch.setattr(dating, "DATING_VERSION", dating.DATING_VERSION + 1)
+
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+
+    for unit_id, before in versions_before.items():
+        assert ledger._last_version(unit_id) == before + 1  # every unit re-versioned
+        assert ledger.live_anchors(unit_id) == anchors_before[unit_id]  # nothing retires
+    assert ledger.corpus_revision() != revision
+
+    # A second sync at the same (now-current) dating version is a no-op.
+    revision_2 = ledger.corpus_revision()
+    versions_after_bump = {unit_id: ledger._last_version(unit_id) for unit_id in versions_before}
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+    assert {unit_id: ledger._last_version(unit_id) for unit_id in versions_before} == versions_after_bump
+    assert ledger.corpus_revision() == revision_2
+
+
+# -- issue #45: first-run behaviour treats the current constant as applied --
+
+
+def test_a_fresh_or_pre_upgrade_ledger_versions_nothing_extra_on_its_first_sync(tmp_path):
+    from strata import dating
+
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    assert ledger.dating_version() is None  # a fresh ledger has never recorded one
+
+    report = sources.sync([SOURCES], ledger, cache_db=cache_db)
+    versions_before = {r.ref: ledger._last_version(r.ref) for r in report.records}
+    assert all(n == 1 for n in versions_before.values())
+    assert ledger.dating_version() == dating.DATING_VERSION
+
+    # A ledger "from before this change" looks the same: the column exists
+    # but was never populated by older code. Simulated by clearing it back
+    # to NULL after an ordinary sync has already registered every unit.
+    ledger._conn.execute("UPDATE corpus_revision SET dating_version = NULL WHERE id = 1")
+    ledger._conn.commit()
+    revision = ledger.corpus_revision()
+
+    sources.sync([SOURCES], ledger, cache_db=cache_db)
+    for ref, before in versions_before.items():
+        assert ledger._last_version(ref) == before  # no version bump from the reset alone
+    assert ledger.corpus_revision() == revision  # no revision advance either
+    assert ledger.dating_version() == dating.DATING_VERSION

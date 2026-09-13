@@ -429,6 +429,32 @@ CONVERTER_IDS: dict[str, str] = {
     ".eml": "eml",
 }
 
+# Each converter's version, hand-bumped when a fix changes what it produces
+# (CONTEXT.md, "Version"): a source hash would invalidate every cached
+# conversion on a comment edit or refactor, so invalidation is a deliberate
+# constant bump instead, recorded in the diff. Kept beside CONVERTER_IDS,
+# one entry per name, so the two can never drift out of step.
+CONVERTER_VERSIONS: dict[str, int] = {
+    "text": 1,
+    "docx": 1,
+    "pdf": 1,
+    "eml": 1,
+}
+
+
+def converter_id(suffix: str) -> str | None:
+    """The versioned converter id for a suffix (``eml@1``, ASCII, one ``@``,
+    no spaces) - what the sources adapter stores in the conversion cache key
+    and passes to :meth:`strata.ledger.Ledger.align` as ``converter``. A
+    bumped version renders a new id, which misses the cache and produces a
+    new ledger version even when the paragraphs are unchanged. ``None`` when
+    no converter claims the suffix."""
+    name = CONVERTER_IDS.get(suffix)
+    if name is None:
+        return None
+    return f"{name}@{CONVERTER_VERSIONS[name]}"
+
+
 _CONVERTER_FUNCS = {
     "text": _convert_text,
     "docx": _convert_docx,

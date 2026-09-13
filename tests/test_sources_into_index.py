@@ -15,10 +15,13 @@ from pathlib import Path
 
 import pytest
 
+from strata import dating, normalizer
 from strata.corpus import sources
 from strata.embeddings import FakeEmbedder
 from strata.index import BadRef, Index
 from strata.ledger import Ledger
+
+from factories import make_note
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ROOT / "examples" / "west-desk" / "sources"
@@ -101,6 +104,62 @@ def test_sources_sync_into_the_index_through_an_edit_and_a_delete(tmp_path):
         retired = index.read(f"{glossary_id} p1")
         assert retired.body == "Desk glossary"
         assert any("retired" in label for label in retired.labels)
+    finally:
+        index.close()
+        ledger.close()
+
+
+# -- issue #45: a converter or dating bump drops every digest's credit -----
+
+
+def test_a_converter_or_dating_bump_drops_every_digests_coverage_credit(tmp_path, monkeypatch):
+    """Carried over from #31's coverage checkbox ("a conversion or dating
+    change each drop the digest's credit"), driven through the real adapter
+    and its hand-bumped versions rather than a monkeypatched ``converter``/
+    ``dated`` passed straight to the ledger."""
+    corpus = tmp_path / "sources"
+    shutil.copytree(SOURCES, corpus)
+    ledger = Ledger(tmp_path / "ledger.db")
+    cache_db = tmp_path / "store.db"
+    index = Index(tmp_path / "index.db", ledger=ledger, embedder=FakeEmbedder())
+    window = ("2000-01-01", "2099-12-31")  # wide enough to span every fixture date
+
+    def synced_digest(ref):
+        return make_note(
+            ref, ["Digest body."], type="digest", window=window,
+            corpus_revision=ledger.corpus_revision(), coverage_complete=True,
+        )
+
+    def covered_refs():
+        return {row.ref for row in index.search(from_=window[0], to=window[1]).covered}
+
+    try:
+        first = sources.sync([corpus], ledger, cache_db=cache_db)
+        index.sync(list(first.records))
+        digest_1 = synced_digest("notes/digest/all-1.md")
+        index.sync([*first.records, digest_1])
+        assert covered_refs() == {digest_1.ref}
+
+        # Bump a converter version: only its units re-convert, but the
+        # corpus revision advances, so the digest at the old revision loses
+        # credit even though no source content changed.
+        monkeypatch.setitem(normalizer.CONVERTER_VERSIONS, "text", normalizer.CONVERTER_VERSIONS["text"] + 1)
+        second = sources.sync([corpus], ledger, cache_db=cache_db)
+        index.sync([*second.records, digest_1])
+        assert covered_refs() == set()
+
+        # A fresh digest at the new revision earns credit again.
+        digest_2 = synced_digest("notes/digest/all-2.md")
+        index.sync([*second.records, digest_1, digest_2])
+        assert covered_refs() == {digest_2.ref}
+
+        # Bump the dating version: no conversion re-runs, but every unit
+        # re-versions, advancing the revision and dropping digest_2's
+        # credit too.
+        monkeypatch.setattr(dating, "DATING_VERSION", dating.DATING_VERSION + 1)
+        third = sources.sync([corpus], ledger, cache_db=cache_db)
+        index.sync([*third.records, digest_1, digest_2])
+        assert covered_refs() == set()
     finally:
         index.close()
         ledger.close()
