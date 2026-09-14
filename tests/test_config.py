@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from strata.config import ConfigError, load
@@ -65,3 +67,15 @@ def test_malformed_fields_are_rejected(tmp_path, text):
     _write(tmp_path, text)
     with pytest.raises(ConfigError):
         load(tmp_path)
+
+
+def test_corpus_roots_and_manuscript_path_resolve_against_the_project_folder(tmp_path):
+    _write(tmp_path, "corpus:\n  - ./sources\n  - /abs/other\nmanuscript: manuscript\n")
+    cfg = load(tmp_path)
+    assert cfg.corpus_roots(tmp_path) == [tmp_path / "sources", Path("/abs/other")]
+    assert cfg.manuscript_path(tmp_path) == tmp_path / "manuscript"
+
+
+def test_manuscript_path_is_none_when_no_manuscript(tmp_path):
+    _write(tmp_path, "corpus: []\n")
+    assert load(tmp_path).manuscript_path(tmp_path) is None

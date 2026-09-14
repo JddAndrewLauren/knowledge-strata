@@ -29,12 +29,25 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ProjectConfig:
-    """Paths exactly as typed (design.md: "init writes only paths");
-    resolving a relative one against the project folder is the caller's job."""
+    """Paths exactly as typed (design.md: "init writes only paths"), with
+    the two accessors that resolve them against the project folder - the
+    one place both the server and the CLI get their corpus roots and
+    manuscript path from."""
 
     corpus: tuple[str, ...]
     manuscript: str | None
     chunk_tokens: int
+
+    def corpus_roots(self, project_folder: Path) -> list[Path]:
+        return [_resolve(project_folder, root) for root in self.corpus]
+
+    def manuscript_path(self, project_folder: Path) -> Path | None:
+        return _resolve(project_folder, self.manuscript) if self.manuscript else None
+
+
+def _resolve(folder: Path, maybe_relative: str) -> Path:
+    path = Path(maybe_relative)
+    return path if path.is_absolute() else folder / path
 
 
 def load(project_folder: str | Path) -> ProjectConfig:
@@ -64,11 +77,13 @@ def load(project_folder: str | Path) -> ProjectConfig:
 
 def write(project_folder: str | Path, *, corpus: Sequence[str], manuscript: str | None) -> None:
     """``strata init``'s half of this module: replace ``.strata/config.yaml``
-    with exactly what was typed this run - ``corpus`` and, only if given,
-    ``manuscript`` - and nothing else (design.md "init writes only paths").
-    Flags are the whole truth (issue #33): a call with no ``manuscript``
-    drops one written by an earlier call, and ``chunk_tokens`` is never
-    written here, only ever hand-edited."""
+    with ``corpus`` and, only if given, ``manuscript`` - and nothing else
+    (design.md "init writes only paths"). Flags are the whole truth (issue
+    #33): a call with no ``manuscript`` drops one written by an earlier call.
+    ``corpus`` is whatever the caller settled on - the list typed this run,
+    or the one already on file when no ``--corpus`` was typed (an empty
+    corpus cannot be typed, so an absent flag never empties it). ``chunk_
+    tokens`` is never written here, only ever hand-edited."""
     path = Path(project_folder) / ".strata" / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, object] = {"corpus": list(corpus)}

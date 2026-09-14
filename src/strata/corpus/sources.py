@@ -24,7 +24,7 @@ file that later converts again resumes its unit at a new version.
 Never opens an attachment and never writes inside a corpus root.
 
 The converter id in the cache key and passed to ``Ledger.align`` carries its
-hand-bumped version (``eml@1``, :func:`strata.normalizer.converter_id`), so
+hand-bumped version (``eml@2``, :func:`strata.normalizer.converter_id`), so
 bumping it alone misses the cache and re-converts. Once every unit is aligned
 under the current id, the cache sweeps the rows a bump - or a bare pre-#45
 converter name - left behind (issue #54); a sync with no bump sweeps nothing.
@@ -272,7 +272,13 @@ class _ConversionCache:
         ``{"text": "text@2"}``). A name's superseded keys are its bare
         pre-#45 name and any version other than ``current``; a name whose id
         matches what was swept for last time is untouched, so an unbumped
-        converter, or a second sync at the same version, deletes nothing."""
+        converter, or a second sync at the same version, deletes nothing.
+
+        Two known, unreached limits (PR #59 review): two tool versions
+        sharing one ``store.db`` alternately sweep each other's generation -
+        correct, the cache is disposable, but each sync re-converts - and
+        the ``LIKE`` pattern is not escaped, so a converter name containing
+        ``_`` or ``%`` would over-match; no current name contains either."""
         with self._conn:
             for name, converter in current.items():
                 row = self._conn.execute(

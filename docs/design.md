@@ -31,7 +31,9 @@ It writes `.strata/config.yaml`, registers the server in that folder's
 `.mcp.json`, allowlists the tools and the skill's commits in
 `.claude/settings.json`, makes the folder a git repository if it is not one,
 creates `notes/project.md`, installs the skill and the reader agent at user
-level, and runs the first index. Run again with flags it replaces the paths;
+level, and runs the first index. Run again with flags it replaces the paths
+(`--corpus` replaces the list and drops a manuscript not re-typed; `--manuscript`
+alone keeps the corpus list on file, since an empty corpus cannot be typed);
 run bare in an initialized folder it is the refresh (re-sync, rewrite the
 user-level files). First indexing reports progress and interruption/recovery state.
 Until it completes, every tool reply declares `indexing: incomplete`; partial
@@ -93,6 +95,9 @@ only thing the server does.
     corpus       folder -> Records                (three adapters)
     index        sync(Records); search(); read()  (owns freshness, ranking,
                                                    the header)
+    config       config.yaml -> project settings  (read fresh by server and cli)
+    project      Project + sync                   (the fresh walk shared by
+                                                   server and cli)
     server       two MCP tools over index
     cli          strata init, strata index
     skill        the workflow, read by the session
