@@ -1224,7 +1224,27 @@ class Index:
         def fits(reply: SearchReply) -> bool:
             return estimate_tokens(_render_reply(reply)) <= REPLY_TOKEN_BUDGET
 
-        candidate = build(hit_specs_page, month_page, covered_page, chunks_page)
+        def with_continuation(reply: SearchReply) -> SearchReply:
+            # The cursor is part of the rendered reply, so it is attached
+            # before the fit check, not after: a page trimmed to the budget's
+            # edge and then handed a ~50-token cursor was the one reply that
+            # overran (the first page of a 500-hit browse).
+            next_offsets = {
+                "hits": offsets["hits"] + len(hit_specs_page),
+                "month": offsets["month"] + len(month_page),
+                "covered": offsets["covered"] + len(covered_page),
+                "chunks": offsets["chunks"] + len(chunks_page),
+            }
+            more = (
+                next_offsets["hits"] < len(hit_specs)
+                or next_offsets["month"] < len(by_month_all)
+                or next_offsets["covered"] < len(covered_all)
+                or next_offsets["chunks"] < len(chunks_all)
+            )
+            continuation = _encode_cursor({**cursor_base, "off": next_offsets}) if more else None
+            return replace(reply, continuation=continuation)
+
+        candidate = with_continuation(build(hit_specs_page, month_page, covered_page, chunks_page))
         # The normal page (already capped at 100/500 per list) usually fits
         # in one render; only an oversized item (many long rows) needs
         # trimming - shrink whichever list is currently largest until it
@@ -1239,24 +1259,8 @@ class Index:
                 break
             name = max(pages, key=lambda key: len(pages[key]))
             pages[name].pop()
-            candidate = build(hit_specs_page, month_page, covered_page, chunks_page)
+            candidate = with_continuation(build(hit_specs_page, month_page, covered_page, chunks_page))
 
-        next_offsets = {
-            "hits": offsets["hits"] + len(hit_specs_page),
-            "month": offsets["month"] + len(month_page),
-            "covered": offsets["covered"] + len(covered_page),
-            "chunks": offsets["chunks"] + len(chunks_page),
-        }
-        more = (
-            next_offsets["hits"] < len(hit_specs)
-            or next_offsets["month"] < len(by_month_all)
-            or next_offsets["covered"] < len(covered_all)
-            or next_offsets["chunks"] < len(chunks_all)
-        )
-        continuation = None
-        if more:
-            continuation = _encode_cursor({**cursor_base, "off": next_offsets})
-        candidate = replace(candidate, continuation=continuation)
         return _with_reply_tokens(candidate)
 
     def _build_hit(self, spec: "_HitSpec", record_row: sqlite3.Row, paragraph_row: sqlite3.Row | None, query: str) -> Hit:
@@ -1432,6 +1436,12 @@ class Index:
         # headroom for the continuation and reply_tokens lines.
         labels_bytes = sum(len(label.encode("utf-8")) + 1 for label in labels)
         budget_bytes = REPLY_TOKEN_BUDGET * 4 - labels_bytes - 400
+        if budget_bytes <= 0:
+            # The header cap (issue #52) keeps this from happening for an
+            # oversized title; refuse loudly rather than fall back to
+            # _minimum_cut's one-character pages if some other label ever
+            # crowds out the budget.
+            raise ValueError(f"labels for {ref!r} leave no room for body text: budget_bytes={budget_bytes}")
         pieces, next_off = _paginate(units, start_para, start_char, budget_bytes)
         continuation = None
         if next_off is not None:
@@ -1481,8 +1491,11 @@ class Index:
         return labels + [retired.marker(canonical), retired.pointer()], [(canonical, retired.text)]
 
     def _read_header_line(self, canonical: str, record_row: sqlite3.Row) -> str:
+        # The title is capped on display only, the same word-boundary cap as
+        # Hit.line (issue #52); the stored title stays full and searchable.
         date = self._record_date(record_row)
-        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {record_row['title']}"
+        title = cap_at_word_boundary(record_row["title"])
+        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {title}"
 
     def _paragraph_texts(self, ref: str) -> list[str]:
         rows = self._conn.execute("SELECT text FROM paragraphs WHERE ref = ? ORDER BY idx", (ref,)).fetchall()
