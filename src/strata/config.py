@@ -11,6 +11,7 @@ here too.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,3 +60,18 @@ def load(project_folder: str | Path) -> ProjectConfig:
         raise ConfigError(f"{path}: chunk_tokens must be a positive integer")
 
     return ProjectConfig(corpus=tuple(corpus), manuscript=manuscript, chunk_tokens=chunk_tokens)
+
+
+def write(project_folder: str | Path, *, corpus: Sequence[str], manuscript: str | None) -> None:
+    """``strata init``'s half of this module: replace ``.strata/config.yaml``
+    with exactly what was typed this run - ``corpus`` and, only if given,
+    ``manuscript`` - and nothing else (design.md "init writes only paths").
+    Flags are the whole truth (issue #33): a call with no ``manuscript``
+    drops one written by an earlier call, and ``chunk_tokens`` is never
+    written here, only ever hand-edited."""
+    path = Path(project_folder) / ".strata" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, object] = {"corpus": list(corpus)}
+    if manuscript is not None:
+        data["manuscript"] = manuscript
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")

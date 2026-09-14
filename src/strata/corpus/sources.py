@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from strata import dating, normalizer, refs
-from strata.ledger import Ledger
+from strata.ledger import AlignResult, Ledger
 from strata.record import Record
 
 
@@ -64,11 +64,15 @@ class SyncReport:
     """One call's outcome: the Records to index, the units that produced
     none (and why), and the unit ids retired on this call - their file is
     gone, or it is still there but no longer converts (listed in ``skipped``
-    too) - and so marked deleted in the ledger."""
+    too) - and so marked deleted in the ledger. ``aligned`` is every unit's
+    :class:`~strata.ledger.AlignResult` from this call, live and retired
+    alike, in walk order - the CLI's ``strata index`` prints ``line()`` for
+    the ones where ``changed`` (CONTEXT.md, "Drift"; ADR-0001)."""
 
     records: tuple[Record, ...]
     skipped: tuple[Skip, ...]
     deleted: tuple[str, ...]
+    aligned: tuple[AlignResult, ...] = ()
 
 
 def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | None = None) -> SyncReport:
@@ -129,9 +133,10 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
 
     ids = ledger.register([key for key, *_ in pending])
     records = []
+    aligned: list[AlignResult] = []
     for key, relative, content, sha256, converter, paragraphs, title in pending:
         when = dating.date(dating.RawUnit(path=relative, kind="source", content=content, paragraphs=paragraphs))
-        ledger.align(key, sha256, paragraphs, converter=converter, at=at, dated=dated)
+        aligned.append(ledger.align(key, sha256, paragraphs, converter=converter, at=at, dated=dated))
         ref = refs.render(refs.SourceRef(ids[key]))
         # An empty-Subject email with no body words converts to an empty
         # title (normalizer.py: #28's "then the ref" fallback); Record
@@ -148,13 +153,13 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
     deleted = []
     for path, (unit_id, is_deleted) in ledger.known_units().items():
         if path not in live and not is_deleted:
-            ledger.retire_unit(path, at=at)
+            aligned.append(ledger.retire_unit(path, at=at))
             deleted.append(unit_id)
 
     if stored_dating_version != dating.DATING_VERSION:
         ledger.set_dating_version(dating.DATING_VERSION)
 
-    return SyncReport(records=tuple(records), skipped=tuple(skipped), deleted=tuple(deleted))
+    return SyncReport(records=tuple(records), skipped=tuple(skipped), deleted=tuple(deleted), aligned=tuple(aligned))
 
 
 def _dedupe_roots(roots: Sequence[str | Path]) -> list[Path]:
