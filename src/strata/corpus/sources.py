@@ -24,7 +24,7 @@ file that later converts again resumes its unit at a new version.
 Never opens an attachment and never writes inside a corpus root.
 
 The converter id in the cache key and passed to ``Ledger.align`` carries its
-hand-bumped version (``eml@1``, :func:`strata.normalizer.converter_id`), so
+hand-bumped version (``eml@2``, :func:`strata.normalizer.converter_id`), so
 bumping it alone misses the cache and re-converts. Once every unit is aligned
 under the current id, the cache sweeps the rows a bump - or a bare pre-#45
 converter name - left behind (issue #54); a sync with no bump sweeps nothing.

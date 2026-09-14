@@ -445,7 +445,7 @@ CONVERTER_VERSIONS: dict[str, int] = {
 
 
 def converter_id(suffix: str) -> str | None:
-    """The versioned converter id for a suffix (``eml@1``, ASCII, one ``@``,
+    """The versioned converter id for a suffix (``eml@2``, ASCII, one ``@``,
     no spaces) - what the sources adapter stores in the conversion cache key
     and passes to :meth:`strata.ledger.Ledger.align` as ``converter``. A
     bumped version renders a new id, which misses the cache and produces a

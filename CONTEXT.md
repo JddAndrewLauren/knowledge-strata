@@ -18,7 +18,7 @@ Record fields apply.
 
 **Version** - a conversion of a raw unit. A changed file or a bumped converter
 produces version n+1; a converter's hand-bumped integer version travels in its
-id, rendered `name@version` (e.g. `eml@1`), so the bump alone misses the
+id, rendered `name@version` (e.g. `eml@2`), so the bump alone misses the
 conversion cache and versions every unit of that converter. Refs do not carry
 a version, and resolve against the newest.
 
