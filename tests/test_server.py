@@ -238,7 +238,7 @@ def test_note_edit_changes_index_revision_not_corpus_source_edit_changes_both_st
 # -- indexing state --------------------------------------------------------------
 
 
-def test_first_index_interrupted_reports_incomplete_with_progress_and_completes_next_call(tmp_path, monkeypatch):
+def test_first_index_interrupted_reports_incomplete_with_progress_and_completes_next_call(tmp_path, monkeypatch, capsys):
     project_folder = tmp_path / "project"
     source_dir = project_folder / "sources"
     source_dir.mkdir(parents=True)
@@ -267,6 +267,8 @@ def test_first_index_interrupted_reports_incomplete_with_progress_and_completes_
     assert _field(text, "indexing").startswith("incomplete")
     assert "2" in _field(text, "indexing")  # progress: the source and the digest note
     assert _field(text, "covered") == "none"  # design.md: no coverage while a first index is incomplete
+    # The swallowed failure is one plain stderr line, not a repr (the CLI's form).
+    assert "strata: sync failed after 2 records: injected failure mid-sync" in capsys.readouterr().err
 
     monkeypatch.undo()
     text2 = _text(_call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"}))

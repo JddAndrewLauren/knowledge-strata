@@ -10,7 +10,7 @@ is the failure rule: a failure partway hands whatever Records were already
 collected to ``index.sync(..., complete=False)`` - real, ledger-durable
 progress, not just a flag - unless the index was already complete, because
 one bad refresh must not retract a project whose first index has already
-finished (design.md "Indexing state" is about a *first* index; a transient
+finished (design.md "The user's experience" is about a *first* index; a transient
 failure later just leaves the last-known-good, still-complete state). What
 differs is only what each caller prints about it, so nothing here prints.
 """

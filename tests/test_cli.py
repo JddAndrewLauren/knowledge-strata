@@ -32,12 +32,16 @@ def home(tmp_path, monkeypatch):
     """A fake, empty ``$HOME``: no ``.gitconfig`` (exercises the repo-local
     identity fallback by default, the way a fresh CI runner would too), no
     ``~/.claude``. Both the Python-level and the subprocess-level notion of
-    "home" point here, so nothing this test does can reach the real one."""
+    "home" point here, so nothing this test does can reach the real one. The
+    machine's system-level git config is skipped too, so an identity in
+    ``/etc/gitconfig`` cannot make the fallback tests pass or fail by
+    accident."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr(cli.Path, "home", lambda: fake_home)
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     return fake_home
 
 
@@ -275,6 +279,7 @@ def test_no_global_identity_uses_a_local_fallback_and_commits(project, home):
 def test_a_system_identity_counts_and_no_local_fallback_is_written(project, home, tmp_path, monkeypatch):
     system_config = tmp_path / "system.gitconfig"
     system_config.write_text("[user]\n\tname = System Person\n\temail = system@example.org\n", encoding="utf-8")
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM")  # this test wants a system config: the fake one below
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system_config))
     _make_source(project)
 

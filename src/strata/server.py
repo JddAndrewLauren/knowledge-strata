@@ -37,10 +37,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from strata import config, project as project_module, refs
+from strata import config, refs
 from strata.embeddings import FastEmbedEmbedder
 from strata.index import BadRef, CursorError, Index, SearchReply, estimate_tokens
-from strata.project import Project
+from strata.project import Project, open_index, sync
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 # The model-visible errors (design.md "Two tools"): a bad ref, a conflicting or
@@ -59,9 +59,9 @@ def _call(project: Project, fn: Callable[[Index], _T]) -> _T:
     the index as the failure rule says) so the last-known-good index still
     answers."""
     cfg = config.load(project.folder)
-    ledger, index = project_module.open_index(project, cfg)
+    ledger, index = open_index(project, cfg)
     try:
-        outcome = project_module.sync(project, cfg, ledger, index)
+        outcome = sync(project, cfg, ledger, index)
         if outcome.error is not None:
             print(f"strata: sync failed after {len(outcome.records)} records: {outcome.error}", file=sys.stderr)
         return fn(index)
@@ -71,7 +71,7 @@ def _call(project: Project, fn: Callable[[Index], _T]) -> _T:
 
 
 def _suppress_coverage_if_incomplete(reply: SearchReply) -> SearchReply:
-    """design.md "Indexing state": while a first index is incomplete, the
+    """design.md "The user's experience": while a first index is incomplete, the
     server grants no coverage and implies no completeness, whatever
     ``covered`` rows a partial index happens to carry."""
     if reply.indexing == "complete" or not reply.covered:
