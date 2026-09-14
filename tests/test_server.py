@@ -239,8 +239,6 @@ def test_note_edit_changes_index_revision_not_corpus_source_edit_changes_both_st
 
 
 def test_first_index_interrupted_reports_incomplete_with_progress_and_completes_next_call(tmp_path, monkeypatch):
-    import strata.server as server_module
-
     project_folder = tmp_path / "project"
     source_dir = project_folder / "sources"
     source_dir.mkdir(parents=True)
@@ -263,7 +261,7 @@ def test_first_index_interrupted_reports_incomplete_with_progress_and_completes_
     def _boom(folder):
         raise RuntimeError("injected failure mid-sync")
 
-    monkeypatch.setattr(server_module.manuscript, "read", _boom)
+    monkeypatch.setattr(manuscript, "read", _boom)  # the walk lives in strata.project; the adapter is shared
 
     text = _text(_call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"}))
     assert _field(text, "indexing").startswith("incomplete")

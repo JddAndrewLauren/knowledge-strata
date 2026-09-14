@@ -176,6 +176,17 @@ def test_second_flagged_run_replaces_the_corpus_list(project, home):
     assert config.load(project).corpus == ("./other",)
 
 
+def test_manuscript_alone_keeps_the_corpus_list_on_file(project, home):
+    _make_source(project)
+    (project / "manuscript").mkdir()
+    assert _init(project, corpus=["./sources"]) == 0
+
+    assert _init(project, manuscript="./manuscript") == 0  # no --corpus typed
+
+    raw = yaml.safe_load((project / ".strata" / "config.yaml").read_text(encoding="utf-8"))
+    assert raw == {"corpus": ["./sources"], "manuscript": "./manuscript"}
+
+
 def test_bare_refresh_leaves_config_untouched(project, home):
     _make_source(project)
     assert _init(project, corpus=["./sources"], manuscript=None) == 0
@@ -259,6 +270,54 @@ def test_no_global_identity_uses_a_local_fallback_and_commits(project, home):
     assert email.stdout.strip()
     log = _git(["log", "--oneline"], cwd=project)
     assert len(log.stdout.strip().splitlines()) == 1
+
+
+def test_a_system_identity_counts_and_no_local_fallback_is_written(project, home, tmp_path, monkeypatch):
+    system_config = tmp_path / "system.gitconfig"
+    system_config.write_text("[user]\n\tname = System Person\n\temail = system@example.org\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system_config))
+    _make_source(project)
+
+    assert _init(project, corpus=["./sources"]) == 0
+
+    local_name = _git(["config", "--local", "--get", "user.name"], cwd=project)
+    assert local_name.stdout.strip() == ""  # git already had an identity: nothing written
+    author = _git(["log", "-1", "--format=%an <%ae>"], cwd=project)
+    assert author.stdout.strip() == "System Person <system@example.org>"
+
+
+def test_missing_git_is_one_ascii_line_and_nonzero(project, home, tmp_path, monkeypatch, capsys):
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    _make_source(project)
+
+    status = _init(project, corpus=["./sources"])
+
+    assert status != 0
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "git" in err and err.isascii()
+    assert not (project / ".strata").exists()
+
+
+def test_unrelated_staged_changes_in_an_enclosing_repo_never_trigger_a_commit(tmp_path, home):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    _git(["init"], cwd=outer)
+    project = outer / "sub-project"
+    project.mkdir()
+    _make_source(project)
+    assert _init(project, corpus=["./sources"]) == 0
+    first_log = _git(["log", "--oneline"], cwd=outer).stdout.strip().splitlines()
+
+    (outer / "unrelated.txt").write_text("someone else's work\n", encoding="utf-8")
+    _git(["add", "unrelated.txt"], cwd=outer)
+    assert _init(project) == 0  # bare refresh: nothing under the project changed
+
+    second_log = _git(["log", "--oneline"], cwd=outer).stdout.strip().splitlines()
+    assert len(second_log) == len(first_log)
+    staged = _git(["diff", "--cached", "--name-only"], cwd=outer).stdout.split()
+    assert staged == ["unrelated.txt"]  # still staged, still uncommitted
 
 
 def test_second_run_commits_only_if_something_changed(project, home):

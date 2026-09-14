@@ -272,7 +272,13 @@ class _ConversionCache:
         ``{"text": "text@2"}``). A name's superseded keys are its bare
         pre-#45 name and any version other than ``current``; a name whose id
         matches what was swept for last time is untouched, so an unbumped
-        converter, or a second sync at the same version, deletes nothing."""
+        converter, or a second sync at the same version, deletes nothing.
+
+        Two known, unreached limits (PR #59 review): two tool versions
+        sharing one ``store.db`` alternately sweep each other's generation -
+        correct, the cache is disposable, but each sync re-converts - and
+        the ``LIKE`` pattern is not escaped, so a converter name containing
+        ``_`` or ``%`` would over-match; no current name contains either."""
         with self._conn:
             for name, converter in current.items():
                 row = self._conn.execute(

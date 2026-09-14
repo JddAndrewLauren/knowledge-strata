@@ -6,12 +6,14 @@ refreshes) the project folder named in design.md "The user's experience":
 ``.strata/config.yaml``, ``.gitignore``, ``.mcp.json``, ``.claude/
 settings.json``, ``notes/project.md``, the git repository, the user-level
 skill and reader agent, then the first index. ``strata index`` runs the same
-fresh-as-of-this-call sync (:mod:`strata.server`'s "Freshness") by hand and
-prints drift.
+fresh-as-of-this-call sync the server runs per call (:func:`strata.project.sync`)
+by hand and prints drift.
 
 Flags are the whole truth (CONTEXT.md): every ``strata init`` call that
-carries a flag rewrites ``.strata/config.yaml`` from exactly what was typed
-this run, corpus included even when empty. A bare call in an initialized
+carries a flag rewrites ``.strata/config.yaml`` from what was typed this
+run - ``--corpus`` replaces the list, a ``--manuscript`` not re-typed is
+dropped - except that ``--manuscript`` alone keeps the corpus list already
+on file, since an empty corpus cannot be typed. A bare call in an initialized
 folder is the refresh - re-sync plus rewriting the user-level files - and
 never touches ``config.yaml``, ``notes/project.md`` or an already-present
 ``.gitignore`` line. A bare call in a fresh folder has nothing to write and
@@ -21,17 +23,14 @@ is the one error case (design.md: "the one line to type").
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
 
-from strata import config
-from strata.corpus import manuscript, notes, sources
+from strata import config, project
 from strata.embeddings import Embedder, FastEmbedEmbedder
-from strata.index import Index
-from strata.ledger import Ledger
-from strata.record import Record
 
 _GITIGNORE_LINE = ".strata/cache/"
 _ALLOWED_PERMISSIONS = (
@@ -113,8 +112,13 @@ def cmd_init(
             file=sys.stderr,
         )
         return 1
+    if shutil.which("git") is None:
+        print("strata: git was not found on PATH; install git and rerun strata init", file=sys.stderr)
+        return 1
 
     if any_flag_given:
+        if not corpus and initialized:
+            corpus = list(config.load(folder).corpus)
         config.write(folder, corpus=corpus, manuscript=manuscript)
     cfg = config.load(folder)
 
@@ -216,13 +220,13 @@ def _ensure_git_repo(folder: Path) -> None:
     """``git init`` only when ``folder`` is not already part of a repository
     (a parent's, a worktree's, or its own) - design.md "git": init if not
     one. A repo-local ``user.name``/``user.email`` fallback covers the
-    (also per-repo) case where no global identity is configured, so the
-    commit below never fails on that account."""
+    (also per-repo) case where git resolves no identity at all - system,
+    global or local - so the commit below never fails on that account."""
     inside = _git(["rev-parse", "--is-inside-work-tree"], cwd=folder)
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         _git(["init"], cwd=folder)
     for key, fallback in _GIT_IDENTITY_FALLBACK:
-        result = _git(["config", "--global", "--get", key])
+        result = _git(["config", "--get", key], cwd=folder)
         if result.returncode != 0 or not result.stdout.strip():
             _git(["config", key, fallback], cwd=folder)
 
@@ -230,10 +234,12 @@ def _ensure_git_repo(folder: Path) -> None:
 def _git_commit_if_changed(folder: Path) -> None:
     """Stage everything under ``folder`` (never outside it - corpus roots
     are external, CONTEXT.md "Corpus") and commit only if that changed
-    something (design.md "git": one commit first run, "commit only if
-    something changed" on a refresh)."""
+    something under ``folder`` (design.md "git": one commit first run,
+    "commit only if something changed" on a refresh). The check is scoped
+    to the folder: when it sits inside a larger repository, that repo's
+    unrelated dirtiness must not trigger a ``strata init`` commit."""
     _git(["add", "-A", "."], cwd=folder)
-    status = _git(["status", "--porcelain"], cwd=folder)
+    status = _git(["status", "--porcelain", "--", "."], cwd=folder)
     if status.stdout.strip():
         _git(["commit", "-m", _COMMIT_MESSAGE], cwd=folder)
 
@@ -251,11 +257,6 @@ def cmd_index(folder: Path, *, embedder: Embedder | None = None) -> int:
     return _sync_project(folder, cfg, report_drift=True, embedder=embedder)
 
 
-def _resolve(folder: Path, maybe_relative: str) -> Path:
-    path = Path(maybe_relative)
-    return path if path.is_absolute() else folder / path
-
-
 def _sync_project(
     folder: Path,
     cfg: config.ProjectConfig,
@@ -264,13 +265,13 @@ def _sync_project(
     embedder: Embedder | None,
 ) -> int:
     """Fresh-as-of-this-call sync (design.md "Freshness"), driven by the CLI
-    instead of a live server call, mirroring :mod:`strata.server`'s own
-    catch-and-report shape: a failure during a still-incomplete first index
-    hands whatever was already collected to ``index.sync(..., complete=
-    False)`` - real, ledger-durable progress, not just a flag, and resumable
-    because :meth:`~strata.ledger.Ledger.align` is a per-unit no-op on
-    unchanged content next time - while a failure after the first index has
-    already finished never retracts that last-good, complete index.
+    instead of a live server call: :func:`strata.project.sync`, the walk and
+    failure rule the server runs per call, with the CLI's own words for the
+    outcome. A failure during a still-incomplete first index leaves real,
+    ledger-durable progress behind and is resumable because
+    :meth:`~strata.ledger.Ledger.align` is a per-unit no-op on unchanged
+    content next time; a failure after the first index has already finished
+    never retracts that last-good, complete index.
 
     Prints progress (units seen, converted, embedded paragraphs) while the
     first index is not yet complete; once it is, ``strata index`` prints one
@@ -278,47 +279,35 @@ def _sync_project(
     (CONTEXT.md "Drift") when ``report_drift`` is set - ``strata init``'s own
     refresh sync stays quiet, its output reserved for setup.
     """
-    ledger = Ledger(folder / ".strata" / "ledger.db")
-    index_path = folder / ".strata" / "cache" / "index.db"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    index = Index(index_path, ledger=ledger, embedder=embedder or FastEmbedEmbedder(), chunk_tokens=cfg.chunk_tokens)
-    was_complete = index.indexing_state == "complete"
-    records: list[Record] = []
-    source_report: sources.SyncReport | None = None
+    proj = project.Project(folder=folder, embedder=embedder or FastEmbedEmbedder())
+    ledger, index = project.open_index(proj, cfg)
     try:
-        try:
-            roots = [_resolve(folder, root) for root in cfg.corpus]
-            source_report = sources.sync(roots, ledger)
-            records.extend(source_report.records)
-            notes_folder = folder / "notes"
-            if notes_folder.is_dir():
-                records.extend(notes.read(notes_folder))
-            if cfg.manuscript:
-                records.extend(manuscript.read(_resolve(folder, cfg.manuscript)).records)
-        except Exception as error:
-            if was_complete:
-                print(f"strata: sync failed, serving the last complete index: {error}", file=sys.stderr)
-            else:
-                index.sync(records, complete=False)
-                print(f"strata: indexing incomplete: {error}", file=sys.stderr)
-            return 1
-
-        index.sync(records, complete=True)
-        if not was_complete:
-            seen = len(source_report.records) + len(source_report.skipped)
-            embedded = sum(len(record.paragraphs) for record in records)
-            print(
-                f"strata: first index complete: {seen} units seen, "
-                f"{len(source_report.records)} converted, {embedded} embedded"
-            )
-        elif report_drift:
-            for aligned in source_report.aligned:
-                if aligned.changed:
-                    print(aligned.line())
-        return 0
+        outcome = project.sync(proj, cfg, ledger, index)
     finally:
         index.close()
         ledger.close()
+
+    if outcome.error is not None:
+        if outcome.was_complete:
+            print(f"strata: sync failed, serving the last complete index: {outcome.error}", file=sys.stderr)
+        else:
+            print(f"strata: indexing incomplete: {outcome.error}", file=sys.stderr)
+        return 1
+
+    source_report = outcome.source_report
+    assert source_report is not None  # a successful sync always has one
+    if not outcome.was_complete:
+        seen = len(source_report.records) + len(source_report.skipped)
+        embedded = sum(len(record.paragraphs) for record in outcome.records)
+        print(
+            f"strata: first index complete: {seen} units seen, "
+            f"{len(source_report.records)} converted, {embedded} embedded"
+        )
+    elif report_drift:
+        for aligned in source_report.aligned:
+            if aligned.changed:
+                print(aligned.line())
+    return 0
 
 
 if __name__ == "__main__":

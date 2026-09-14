@@ -15,6 +15,7 @@ without touching stored passage vectors (python-stack.md ss3).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol
 
 QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
@@ -87,21 +88,31 @@ class FakeEmbedder:
         return self._vector(text)
 
 
+def default_model_cache() -> Path:
+    """``~/.strata/cache/models/``, read at call time so a faked home is honoured."""
+    return Path.home() / ".strata" / "cache" / "models"
+
+
 class FastEmbedEmbedder:
     """``fastembed`` ``BAAI/bge-small-en-v1.5`` (384-d), for real use. Never
-    imported by the hermetic suite: constructing one downloads model files on
-    first use, which the ordinary test suite refuses to do (CONTEXT.md:
-    hermetic). Passages are embedded bare; the bge query instruction is
-    added on the query side only (python-stack.md ss3, "optional" prefix,
-    "slight degradation" without it)."""
+    constructed for real by the hermetic suite: constructing one downloads
+    model files on first use, which the ordinary test suite refuses to do
+    (CONTEXT.md: hermetic). The model files live at ``~/.strata/cache/models/``
+    (design.md "Multi-project": beside ``store.db``, one download shared by
+    every project on the machine, disposable); ``cache_dir`` overrides that.
+    Passages are embedded bare; the bge query instruction is added on the
+    query side only (python-stack.md ss3, "optional" prefix, "slight
+    degradation" without it)."""
 
     model_id = "bge-small-en-v1.5"
     dim = 384
 
-    def __init__(self):
+    def __init__(self, cache_dir: Path | None = None):
         from fastembed import TextEmbedding
 
-        self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        cache_dir = cache_dir if cache_dir is not None else default_model_cache()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=str(cache_dir))
 
     def embed_passages(self, texts: Sequence[str]) -> list[Vector]:
         return [tuple(float(x) for x in vec) for vec in self._model.embed(list(texts))]
