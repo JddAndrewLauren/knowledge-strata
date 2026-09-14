@@ -1224,7 +1224,27 @@ class Index:
         def fits(reply: SearchReply) -> bool:
             return estimate_tokens(_render_reply(reply)) <= REPLY_TOKEN_BUDGET
 
-        candidate = build(hit_specs_page, month_page, covered_page, chunks_page)
+        def with_continuation(reply: SearchReply) -> SearchReply:
+            # The cursor is part of the rendered reply, so it is attached
+            # before the fit check, not after: a page trimmed to the budget's
+            # edge and then handed a ~50-token cursor was the one reply that
+            # overran (the first page of a 500-hit browse).
+            next_offsets = {
+                "hits": offsets["hits"] + len(hit_specs_page),
+                "month": offsets["month"] + len(month_page),
+                "covered": offsets["covered"] + len(covered_page),
+                "chunks": offsets["chunks"] + len(chunks_page),
+            }
+            more = (
+                next_offsets["hits"] < len(hit_specs)
+                or next_offsets["month"] < len(by_month_all)
+                or next_offsets["covered"] < len(covered_all)
+                or next_offsets["chunks"] < len(chunks_all)
+            )
+            continuation = _encode_cursor({**cursor_base, "off": next_offsets}) if more else None
+            return replace(reply, continuation=continuation)
+
+        candidate = with_continuation(build(hit_specs_page, month_page, covered_page, chunks_page))
         # The normal page (already capped at 100/500 per list) usually fits
         # in one render; only an oversized item (many long rows) needs
         # trimming - shrink whichever list is currently largest until it
@@ -1239,24 +1259,8 @@ class Index:
                 break
             name = max(pages, key=lambda key: len(pages[key]))
             pages[name].pop()
-            candidate = build(hit_specs_page, month_page, covered_page, chunks_page)
+            candidate = with_continuation(build(hit_specs_page, month_page, covered_page, chunks_page))
 
-        next_offsets = {
-            "hits": offsets["hits"] + len(hit_specs_page),
-            "month": offsets["month"] + len(month_page),
-            "covered": offsets["covered"] + len(covered_page),
-            "chunks": offsets["chunks"] + len(chunks_page),
-        }
-        more = (
-            next_offsets["hits"] < len(hit_specs)
-            or next_offsets["month"] < len(by_month_all)
-            or next_offsets["covered"] < len(covered_all)
-            or next_offsets["chunks"] < len(chunks_all)
-        )
-        continuation = None
-        if more:
-            continuation = _encode_cursor({**cursor_base, "off": next_offsets})
-        candidate = replace(candidate, continuation=continuation)
         return _with_reply_tokens(candidate)
 
     def _build_hit(self, spec: "_HitSpec", record_row: sqlite3.Row, paragraph_row: sqlite3.Row | None, query: str) -> Hit:

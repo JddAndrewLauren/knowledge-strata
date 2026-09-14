@@ -99,6 +99,23 @@ def test_long_titles_keep_the_reply_bounded_and_still_enumerate(tmp_path, ledger
     assert len(set(h.ref for h in hits)) == 20
 
 
+def test_a_page_trimmed_to_the_budget_edge_still_fits_with_its_cursor(tmp_path, ledger):
+    """The continuation cursor is part of the reply: a 500-hit first page that
+    the fit loop trims to the edge of the budget must count the cursor it
+    then carries (found by issue #32's demo e2e: 8050 of 8000)."""
+    index = lexical_index(tmp_path, ledger, chunk_tokens=500)  # a busy day: dozens of chunk rows in the header
+    body = "A cutoff-day note with enough words in it to weigh about sixty tokens on its own. " * 3
+    records = [
+        make_source(ledger, f"r{i:03d}.txt", [f"{body}Text {i}."], date=exact("2001-06-01"), title=f"Cutoff note {i}")
+        for i in range(520)
+    ]
+    index.sync(records)
+    first = index.search(from_="2001-06-01", to="2001-06-01")
+    assert len(first.chunks) > 50 and first.continuation  # the fit loop trimmed the hits
+    assert first.reply_tokens <= REPLY_TOKEN_BUDGET
+    assert len(set(h.ref for h in _drain(index, first))) == 520
+
+
 def test_a_60000_char_title_hit_stays_bounded_and_capped_on_a_word_boundary(tmp_path, ledger):
     index = lexical_index(tmp_path, ledger)
     long_title = " ".join(f"word{i}" for i in range(12_000))
