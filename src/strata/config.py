@@ -56,6 +56,11 @@ def load(project_folder: str | Path) -> ProjectConfig:
     if not path.exists():
         raise ConfigError(f"no {path}: run `strata init` first")
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return validate(data, path=path)
+
+
+def validate(data, *, path="config") -> ProjectConfig:
+    """Validate proposed settings without publishing them to disk."""
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: not a mapping of fields")
     unknown = sorted(set(data) - _KNOWN_KEYS)

@@ -70,18 +70,21 @@ def _resource(name: str):
     return path.read_text(encoding='utf-8')
 
 
-def initialize(project: str | Path, *, corpus=None, manuscript=None, host_home=None):
+def initialize(project: str | Path, *, corpus=None, manuscript=None, host_home=None, replace_paths=False):
     project = Path(project).resolve()
     project.mkdir(parents=True, exist_ok=True)
     with project_lock(project):
         config_path = project / '.strata' / 'config.yaml'
-        settings = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+        settings = (yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}) if config_path.exists() else {}
         if config_path.exists():
             config.load(project)
         if corpus is not None:
             settings['corpus'] = list(corpus)
+        if replace_paths:
+            settings.pop('manuscript', None)
         if manuscript is not None:
             settings['manuscript'] = manuscript
+        config.validate(settings)
         if not settings.get('corpus'):
             raise ValueError('first initialization requires --corpus PATH')
         for raw in settings['corpus']:
@@ -149,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print('strata: indexing interrupted; run strata index to retry', file=sys.stderr)
         return 130
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, RefreshFailed) as error:
         message = f'strata: {error}'.encode('ascii', errors='backslashreplace').decode('ascii')
         print(message, file=sys.stderr)
         return 1
@@ -251,13 +254,10 @@ def cmd_init(
         print("strata: git was not found on PATH; install git and rerun strata init", file=sys.stderr)
         return 1
 
-    if any_flag_given:
-        if not corpus and initialized:
-            corpus = list(config.load(folder).corpus)
-        config.write(folder, corpus=corpus, manuscript=manuscript)
+    initialize(folder, corpus=list(corpus) if corpus else None,
+               manuscript=manuscript, replace_paths=any_flag_given)
     cfg = config.load(folder)
 
-    initialize(folder)
     _ensure_git_repo(folder)
     status = _sync_project(folder, cfg, report_drift=False, embedder=embedder, legacy_roots=legacy_roots)
     _git_commit_if_changed(folder, before)
@@ -329,7 +329,7 @@ def _sync_project(
     """
     proj = Project(folder=folder, embedder=embedder)
     def progress(message):
-        if getattr(proj, 'was_complete', None) is False:
+        if getattr(proj, 'was_complete', None) is not True:
             print(message.encode('ascii', errors='backslashreplace').decode('ascii'), file=sys.stderr)
     proj.progress = progress
     try:

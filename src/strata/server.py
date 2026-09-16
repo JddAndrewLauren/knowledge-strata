@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, TypeVar
 
@@ -28,7 +27,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from strata import config, refs
-from strata.index import BadRef, CursorError, Index, SearchReply, estimate_tokens
+from strata.index import BadRef, CursorError, Index
 from strata.project import Project, RefreshFailed
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -43,16 +42,6 @@ def _call(project: Project, fn: Callable[[Index], _T]) -> _T:
     """Serialize refresh and query; failed refreshes serve no current results."""
     with project.current() as index:
         return fn(index)
-
-
-def _suppress_coverage_if_incomplete(reply: SearchReply) -> SearchReply:
-    """design.md "The user's experience": while a first index is incomplete, the
-    server grants no coverage and implies no completeness, whatever
-    ``covered`` rows a partial index happens to carry."""
-    if reply.indexing == "complete" or not reply.covered:
-        return reply
-    draft = replace(reply, covered=[], reply_tokens=0)
-    return replace(draft, reply_tokens=estimate_tokens(draft.text()))
 
 
 def build_server(project: Project) -> MCPServer:
@@ -85,7 +74,7 @@ def build_server(project: Project) -> MCPServer:
             )
         except _MODEL_VISIBLE as error:
             raise ToolError(str(error)) from error
-        return _suppress_coverage_if_incomplete(reply).text()
+        return reply.text()
 
     @mcp.tool(title="Read verbatim text", annotations=_READ_ONLY, structured_output=False)
     def read(ref: str = "", cursor: str | None = None) -> str:
@@ -94,10 +83,10 @@ def build_server(project: Project) -> MCPServer:
         summary. ``cursor`` alone resumes a prior read's exact position;
         ``ref`` may be omitted with it, or must match."""
         try:
-            reply = _call(project, lambda index: index.read(ref=ref, cursor=cursor))
+            state, reply = _call(project, lambda index: (index.indexing_state, index.read(ref=ref, cursor=cursor)))
         except _MODEL_VISIBLE as error:
             raise ToolError(str(error)) from error
-        return "indexing: complete\n" + reply.text()
+        return f"indexing: {state}\n" + reply.text()
 
     return mcp
 

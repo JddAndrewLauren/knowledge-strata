@@ -61,7 +61,8 @@ manuscript settings are removed.
 ## Refresh, update, and recover
 
 `strata index` refreshes the current project. Every tool call also performs a
-serialized refresh. Progress goes to stderr; a failed refresh returns an explicit
+serialized refresh. A concurrent refresh is allowed two seconds to release its
+lock before the tool returns an incomplete error asking for a retry. Progress goes to stderr; a failed refresh returns an explicit
 incomplete error instead of presenting an old snapshot as current. Restore an
 unavailable archive and retry. Interrupted scans retire nothing; interrupted
 index writes roll back. If the ledger advanced before an index failure, the next
@@ -80,8 +81,11 @@ must be supplied explicitly once:
 strata index --legacy-root /original/first/root --legacy-root /original/second/root
 ```
 
-Use the original deduplicated order, not a newly reordered configuration. Migration
-retains IDs, versions, and anchor text. If that order is unknown, preserve the ledger
+Use the original deduplicated order, not a newly reordered configuration.
+Migration rejects mappings whose live paths resolve only under another root.
+Identical relative paths across roots remain ambiguous: verify the original order.
+Existing duplicate identities from legacy nested roots are retained; new overlaps
+do not create duplicates. Migration retains IDs, versions, and anchor text. If that order is unknown, preserve the ledger
 and recover the mapping from old configuration/history; do not guess or delete it.
 
 Back up `.strata/ledger.db`, `.strata/config.yaml`, notes, and manuscript with the

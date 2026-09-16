@@ -208,7 +208,7 @@ class Ledger:
         """Bind resolved roots without reinterpreting existing source keys."""
         with self.transaction():
             existing = dict(self._conn.execute("SELECT path, id FROM roots"))
-            legacy = [path for path in self.known_units() if re.match(r"^\d{3,}/", path)]
+            legacy = {path for path in self.known_units() if re.match(r"^\d{3,}/", path)}
             if not existing and legacy:
                 if legacy_roots is None:
                     raise ValueError("legacy ledger needs original ordered roots; use --legacy-root for each original root")
@@ -216,6 +216,19 @@ class Ledger:
                     raise ValueError("legacy roots must be unique and in their original deduplicated order")
                 if any(int(path.split('/')[0]) >= len(legacy_roots) for path in legacy):
                     raise ValueError("legacy root mapping does not cover every stored root number")
+                live = [key for key, (_, deleted) in self.known_units().items() if not deleted and key in legacy]
+                for number, root in enumerate(legacy_roots):
+                    relatives = [key.split('/', 1)[1] for key in live if int(key.split('/')[0]) == number]
+                    def resolves(candidate):
+                        for relative in relatives:
+                            try:
+                                (Path(candidate) / relative).stat()
+                                return True
+                            except FileNotFoundError:
+                                continue
+                        return False
+                    if relatives and not resolves(root) and any(resolves(other) for other in legacy_roots if other != root):
+                        raise ValueError('legacy root mapping conflicts with live source paths; supply original ordered roots')
                 for number, path in enumerate(legacy_roots):
                     self._conn.execute("INSERT INTO roots (id, path) VALUES (?, ?)", (number, path))
                 existing = dict(self._conn.execute("SELECT path, id FROM roots"))

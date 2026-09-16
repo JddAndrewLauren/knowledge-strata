@@ -784,6 +784,7 @@ class Index:
     def _bump_revision(self) -> None:
         counter = int(self._get_meta("revision") or "0") + 1
         self._set_meta("revision", str(counter))
+        self._conn.execute("DELETE FROM meta WHERE key GLOB 'read_ref:*'")
 
     @property
     def index_revision(self) -> str:

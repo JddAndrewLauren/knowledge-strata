@@ -4,7 +4,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 import os
+import errno
 import threading
+import time
+import sqlite3
 from strata import config as project_config
 
 from strata.corpus import sources, notes, manuscript
@@ -28,29 +31,32 @@ def resolve(project: Path, path: str) -> Path:
 
 
 @contextmanager
-def project_lock(project: Path):
-    """OS locks are released on process exit, including interrupted refreshes."""
+def project_lock(project: Path, *, timeout: float = 2.0):
+    """Bound contention; OS locks release on exit, including interrupted refreshes."""
     lock = project / '.strata' / 'refresh.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
     with lock.open('a+b') as stream:
         if os.name == 'nt':
             import msvcrt
             if stream.tell() == 0:
                 stream.write(b'0'); stream.flush()
             stream.seek(0)
-            # LK_LOCK has a short fixed retry limit; explicitly retry contention.
-            import time
-            while True:
-                try:
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError as error:
-                    if error.errno not in (13, 36):
-                        raise
-                    time.sleep(0.1)
         else:
             import fcntl
-            fcntl.flock(stream, fcntl.LOCK_EX)
+        while True:
+            try:
+                if os.name == 'nt':
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RefreshFailed('indexing: incomplete; refresh in progress; retry shortly') from error
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         try:
             yield
         finally:
@@ -62,7 +68,7 @@ def project_lock(project: Path):
 
 class Project:
     def __init__(self, path: str | Path | None = None, *, folder=None, embedder=None, cache_db=None, cache_dir: str | Path | None = None,
-                 embedder_factory=None, semantic=True, progress=None):
+                 embedder_factory=None, semantic=True, progress=None, lock_timeout=2.0):
         self.path = Path(path if path is not None else folder).resolve()
         self.folder = self.path
         self.cache = Path(cache_dir or os.environ.get('STRATA_CACHE_DIR') or Path.home() / '.strata' / 'cache')
@@ -72,6 +78,7 @@ class Project:
         self.progress = progress or (lambda message: None)
         self._embedder = None
         self._lock = threading.RLock()
+        self.lock_timeout = lock_timeout
 
     @property
     def ledger_path(self):
@@ -82,14 +89,35 @@ class Project:
         return self.path / '.strata' / 'cache' / 'index.db'
 
     @contextmanager
+    def _refresh_lock(self):
+        deadline = time.monotonic() + self.lock_timeout
+        if not self._lock.acquire(timeout=self.lock_timeout):
+            raise RefreshFailed('indexing: incomplete; refresh in progress; retry shortly')
+        try:
+            with project_lock(self.path, timeout=max(0, deadline - time.monotonic())):
+                yield
+        finally:
+            self._lock.release()
+
+    @contextmanager
     def current(self, *, legacy_roots=None):
-        with self._lock, project_lock(self.path):
+        with self._refresh_lock():
             settings = config(self.path)
             cache = self.path / '.strata' / 'cache'
             cache.mkdir(parents=True, exist_ok=True)
             ledger = Ledger(self.path / '.strata' / 'ledger.db')
             index = None
             try:
+                self.was_complete = False
+                if self.index_path.exists():
+                    connection = sqlite3.connect(self.index_path)
+                    try:
+                        row = connection.execute("SELECT value FROM meta WHERE key='indexing'").fetchone()
+                        self.was_complete = bool(row and row[0] == 'complete')
+                    except sqlite3.OperationalError:
+                        pass  # A partial index still needs model/recovery progress.
+                    finally:
+                        connection.close()
                 if self._embedder is None:
                     self.progress('Loading embedding model; first use may download model files. Retry strata index if interrupted.')
                     self._embedder = CachedEmbedder(self.factory(), self.cache_db)

@@ -140,27 +140,29 @@ class CachedEmbedder:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=60)
         try:
+            connection.execute("PRAGMA journal_mode=WAL")
             with connection:
                 connection.execute("CREATE TABLE IF NOT EXISTS embeddings (model TEXT, dim INTEGER, hash TEXT, "
                                    "vector BLOB NOT NULL, PRIMARY KEY(model, dim, hash))")
-                keys = [hashlib.sha256(text.encode('utf-8')).hexdigest() for text in texts]
-                vectors = {}
-                missing = {}
-                for key, text in zip(keys, texts):
-                    if key in vectors or key in missing:
-                        continue
-                    row = connection.execute("SELECT vector FROM embeddings WHERE model=? AND dim=? AND hash=?",
-                                             (self.model_id, self.dim, key)).fetchone()
-                    if row:
-                        vectors[key] = struct.unpack(f'<{self.dim}f', row[0])
-                    else:
-                        missing[key] = text
-                items = list(missing.items())
-                for start in range(0, len(items), 64):
-                    batch = items[start:start + 64]
-                    fresh = self._embedder.embed_passages([text for _, text in batch])
-                    if len(fresh) != len(batch):
-                        raise ValueError('embedder returned an incomplete batch')
+            keys = [hashlib.sha256(text.encode('utf-8')).hexdigest() for text in texts]
+            vectors = {}
+            missing = {}
+            for key, text in zip(keys, texts):
+                if key in vectors or key in missing:
+                    continue
+                row = connection.execute("SELECT vector FROM embeddings WHERE model=? AND dim=? AND hash=?",
+                                         (self.model_id, self.dim, key)).fetchone()
+                if row:
+                    vectors[key] = struct.unpack(f'<{self.dim}f', row[0])
+                else:
+                    missing[key] = text
+            items = list(missing.items())
+            for start in range(0, len(items), 64):
+                batch = items[start:start + 64]
+                fresh = self._embedder.embed_passages([text for _, text in batch])
+                if len(fresh) != len(batch):
+                    raise ValueError('embedder returned an incomplete batch')
+                with connection:
                     for (key, _), vector in zip(batch, fresh):
                         if len(vector) != self.dim:
                             raise ValueError('embedder returned the wrong vector dimension')
@@ -168,6 +170,6 @@ class CachedEmbedder:
                         vectors[key] = struct.unpack(f'<{self.dim}f', blob)
                         connection.execute("INSERT OR REPLACE INTO embeddings VALUES (?, ?, ?, ?)",
                                            (self.model_id, self.dim, key, blob))
-                return [vectors[key] for key in keys]
+            return [vectors[key] for key in keys]
         finally:
             connection.close()

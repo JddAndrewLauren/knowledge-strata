@@ -108,3 +108,30 @@ automatic discovery or multi-reader fan-out. Per-tool traces were not captured.
 Review findings should distinguish merge-blocking correctness defects from these
 explicitly open release/scale gates. The branch is an implementation milestone,
 not a claim that all product acceptance has passed.
+
+## Review follow-up (F1-F8)
+
+The follow-up addresses the review of `447e319`:
+
+- F1: dangling links and files disappearing at stat/read are reported as skips;
+  permission and I/O errors still abort the transaction without retirement.
+- F2: init validates proposed paths and host JSON before publishing config under
+  the project lock with atomic replacement. Hand-edited `chunk_tokens` survives.
+- F3: migration rejects a root number whose live relative paths resolve only in
+  another supplied root. Identical paths across roots remain ambiguous and require
+  the original order; the tool does not infer a replacement mapping.
+- F4: model batches run outside cache write transactions. Each batch commits
+  briefly; both cache adapters use WAL and a 60-second SQLite busy timeout.
+- F5: thread and OS lock contention share a two-second wait budget and return a
+  model-visible incomplete/retry error. The design now matches that behavior.
+- F6: existing keys from overlapping legacy roots remain live, preserving both
+  citations; newly introduced overlaps are still deduplicated.
+- F7: persisted completeness is read before model startup so first-use download
+  progress is emitted before the model factory runs.
+- F8: read status comes from the index, obsolete incomplete-serving code is removed,
+  and long-ref handles are swept when a revision invalidates their cursors.
+
+Validation: 693 tests passed, zero skips, one configured e2e deselection; final
+CLI/portability adjustments also passed all 38 CLI/review regression cases.
+Static unused-name and whitespace checks passed. The original PR CI passed on
+Ubuntu; macOS/Windows and the release evidence gaps above remain unverified.

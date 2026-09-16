@@ -36,8 +36,9 @@ level, and runs the first index. Run again with flags it replaces the paths
 alone keeps the corpus list on file, since an empty corpus cannot be typed);
 run bare in an initialized folder it is the refresh (re-sync, rewrite the
 user-level files). First indexing reports progress and interruption/recovery state.
-Until it completes, every tool reply declares `indexing: incomplete`; partial
-results never imply a complete archive or earn digest coverage. Installation,
+Tools wait up to two seconds for another refresh, then return an explicit
+`indexing: incomplete; refresh in progress` error. A failed refresh also returns
+an incomplete error; no results or digest coverage are served until refresh succeeds. Installation,
 updates and recovery on macOS and Windows require the acceptance demonstrations
 in `docs/acceptance.md`. The full contract is on wayfinder #7. After that the user types
 `claude` in that folder, or opens it in the Claude Desktop app's Code tab,
@@ -531,7 +532,8 @@ support. Continue independently settled planning while the report is pending.
 
 Root numbers are now persisted against resolved folders in the durable ledger,
 so configuration order cannot swap source identities. Overlapping roots are
-deduplicated by physical file identity. Legacy roots require an explicit original
+deduplicated by physical file identity, except existing legacy duplicate identities
+are retained to preserve citations. Legacy roots require an explicit original
 ordered mapping. Source scans publish ledger changes only after successful
 completion; missing/inaccessible roots are failures, not empty archives.
 

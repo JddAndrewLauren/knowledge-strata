@@ -94,7 +94,8 @@ def _sync(roots, ledger, *, cache_db=None, legacy_roots=None, progress=None) -> 
     root_ids = ledger.root_ids([str(root) for root in resolved_roots],
                               legacy_roots=None if legacy_roots is None else
                               [str(Path(root).resolve()) for root in legacy_roots])
-    units = _walk(resolved_roots, root_ids)
+    skipped: list[Skip] = []
+    units = _walk(resolved_roots, root_ids, skipped, ledger.known_units())
     at = datetime.now(timezone.utc).isoformat()
 
     # A ledger with no stored dating version - never recorded, before this
@@ -105,7 +106,6 @@ def _sync(roots, ledger, *, cache_db=None, legacy_roots=None, progress=None) -> 
     stored_dating_version = ledger.dating_version()
     dated = stored_dating_version is not None and stored_dating_version != dating.DATING_VERSION
 
-    skipped: list[Skip] = []
     pending: list[tuple[str, Date, str, str, tuple[str, ...], str]] = []
 
     current_converters: dict[str, str] = {}
@@ -118,7 +118,11 @@ def _sync(roots, ledger, *, cache_db=None, legacy_roots=None, progress=None) -> 
                 skipped.append(Skip(relative, f"no converter claims the suffix {path.suffix.lower()!r}"))
                 continue
             current_converters[converter.split("@", 1)[0]] = converter
-            content = path.read_bytes()
+            try:
+                content = path.read_bytes()
+            except FileNotFoundError:
+                skipped.append(Skip(relative, 'file disappeared during scan'))
+                continue
             sha256 = hashlib.sha256(content).hexdigest()
             cached = cache.get(sha256, converter)
             if cached is None:
@@ -187,8 +191,8 @@ def _dedupe_roots(roots: Sequence[str | Path]) -> list[Path]:
     return list(seen)
 
 
-def _walk(roots: list[Path], root_ids: dict[str, int]) -> list[tuple[str, str, Path]]:
-    """Walk strictly: filesystem errors abort; overlapping roots count once."""
+def _walk(roots: list[Path], root_ids: dict[str, int], skipped: list[Skip], known) -> list[tuple[str, str, Path]]:
+    """Skip missing entries; access failures abort. Preserve legacy duplicate keys."""
     units = []
     seen = set()
 
@@ -203,14 +207,19 @@ def _walk(roots: list[Path], root_ids: dict[str, int]) -> list[tuple[str, str, P
                 if name.startswith("."):
                     continue
                 path = Path(folder) / name
-                # stat, rather than is_file(), must surface inaccessible entries.
-                stat = path.stat()
+                relative = path.relative_to(root).as_posix()
+                key = f'{index:03d}/{relative}'
+                try:
+                    path.lstat()
+                    stat = path.stat()
+                except FileNotFoundError:
+                    skipped.append(Skip(relative, 'dangling link or file disappeared during scan'))
+                    continue
                 identity = (stat.st_dev, stat.st_ino) if stat.st_ino else str(path.resolve())
-                if identity in seen:
+                if identity in seen and key not in known:
                     continue
                 seen.add(identity)
-                relative = path.relative_to(root).as_posix()
-                units.append((f"{index:03d}/{relative}", relative, path))
+                units.append((key, relative, path))
     units.sort(key=lambda unit: unit[0])
     return units
 
@@ -240,7 +249,8 @@ class _ConversionCache:
     def __init__(self, cache_db: str | Path | None):
         path = Path(cache_db) if cache_db is not None else _default_cache_db()
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path))
+        self._conn = sqlite3.connect(str(path), timeout=60)
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS conversions ("
             "sha256 TEXT NOT NULL, converter TEXT NOT NULL, "
