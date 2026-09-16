@@ -1,0 +1,63 @@
+{
+  "model": "bge-small-en-v1.5",
+  "real_model": true,
+  "cases": [
+    {
+      "case": "exact",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.0259
+    },
+    {
+      "case": "paraphrase",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.0172
+    },
+    {
+      "case": "alias",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.0171
+    },
+    {
+      "case": "partial-date",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.0167
+    },
+    {
+      "case": "unknown-date",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.0263
+    },
+    {
+      "case": "conflict",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.022
+    },
+    {
+      "case": "date-cutoff",
+      "evidence_recall": 1.0,
+      "top_1_expected": true,
+      "citations_resolve": true,
+      "passed": true,
+      "seconds": 0.0187
+    }
+  ],
+  "limitation": "Small invented retrieval set. Does not measure answer quality, abstention, or agent recovery."
+}

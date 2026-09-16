@@ -308,15 +308,13 @@ def test_read_header_caps_the_title_at_the_same_word_boundary_as_hit_line(tmp_pa
     assert [h.ref for h in past_the_cap.hits] == [f"{rec.ref} p1"]  # still searchable
 
 
-def test_read_raises_loudly_when_labels_leave_no_room_for_body_text(tmp_path, ledger):
-    """Acceptance (issue #52): budget_bytes can no longer go negative and
-    silently degrade to one-character pages; a label set the title cap
-    doesn't reach (here, an oversized warning) raises instead."""
+def test_read_pages_oversized_warnings_without_losing_body(tmp_path, ledger):
     index = lexical_index(tmp_path, ledger)
     note = make_note("notes/theme/big.md", ["Body."], type="theme", warnings=("W" * 40_000,))
     index.sync([note])
-    with pytest.raises(ValueError, match="budget_bytes"):
-        index.read(note.ref)
+    pages, body = _read_pages(index, note.ref)
+    assert body == "Body."
+    assert "W" * 40_000 in "".join(page.metadata or "" for page in pages)
 
 
 def test_a_long_covered_list_pages_within_budget(tmp_path, ledger):

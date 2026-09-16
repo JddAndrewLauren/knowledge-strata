@@ -3,10 +3,10 @@
 
 Walks every corpus root in sorted path order, skipping dotfiles and anything
 under a ``cache/`` directory. Each file is one raw unit; a unit's identity is
-its root index plus its root-relative path (``register`` sorts by this, so
+its persistent ledger root number plus its root-relative path (``register`` sorts by this, so
 ids come out in sorted path order), stable across runs - a moved file is a
-new unit, and two roots naming the same folder collapse to one before
-walking so the same file is never counted twice.
+new unit, and overlapping roots and duplicate physical files are counted once.
+Unavailable roots and failed walks abort without retiring sources.
 
 For each unit the bytes are hashed and, unless the user-level conversion
 cache at ``~/.strata/cache/store.db`` already holds this hash and converter,
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ from pathlib import Path
 
 from strata import dating, normalizer, refs
 from strata.ledger import AlignResult, Ledger
-from strata.record import Record
+from strata.record import Date, Record
 
 
 @dataclass(frozen=True)
@@ -75,12 +76,26 @@ class SyncReport:
     aligned: tuple[AlignResult, ...] = ()
 
 
-def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | None = None) -> SyncReport:
+def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | None = None,
+         legacy_roots: Sequence[str | Path] | None = None, progress=None) -> SyncReport:
+    """A scan is atomic in the durable ledger; failed scans retire nothing."""
+    with ledger.transaction():
+        return _sync(roots, ledger, cache_db=cache_db, legacy_roots=legacy_roots, progress=progress)
+
+
+def _sync(roots, ledger, *, cache_db=None, legacy_roots=None, progress=None) -> SyncReport:
     """Walk ``roots``, align every convertible unit through ``ledger`` and
     return the Records to index plus a report of what was skipped and what
     was retired as deleted."""
     resolved_roots = _dedupe_roots(roots)
-    units = _walk(resolved_roots)
+    for root in resolved_roots:
+        if not root.is_dir():
+            raise OSError(f"corpus root is unavailable or not a directory: {root}")
+    root_ids = ledger.root_ids([str(root) for root in resolved_roots],
+                              legacy_roots=None if legacy_roots is None else
+                              [str(Path(root).resolve()) for root in legacy_roots])
+    skipped: list[Skip] = []
+    units = _walk(resolved_roots, root_ids, skipped, ledger.known_units())
     at = datetime.now(timezone.utc).isoformat()
 
     # A ledger with no stored dating version - never recorded, before this
@@ -91,18 +106,23 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
     stored_dating_version = ledger.dating_version()
     dated = stored_dating_version is not None and stored_dating_version != dating.DATING_VERSION
 
-    skipped: list[Skip] = []
-    pending: list[tuple[str, str, bytes, str, str, tuple[str, ...], str]] = []
-    current_converters: dict[str, str] = {}  # converter name -> the id used this sync
+    pending: list[tuple[str, Date, str, str, tuple[str, ...], str]] = []
 
+    current_converters: dict[str, str] = {}
     with _ConversionCache(cache_db) as cache:
-        for key, relative, path in units:
+        for position, (key, relative, path) in enumerate(units, 1):
+            if progress and (position == 1 or position % 100 == 0 or position == len(units)):
+                progress(f"Converting {position}/{len(units)}")
             converter = normalizer.converter_id(path.suffix.lower())
             if converter is None:
                 skipped.append(Skip(relative, f"no converter claims the suffix {path.suffix.lower()!r}"))
                 continue
             current_converters[converter.split("@", 1)[0]] = converter
-            content = path.read_bytes()
+            try:
+                content = path.read_bytes()
+            except FileNotFoundError:
+                skipped.append(Skip(relative, 'file disappeared during scan'))
+                continue
             sha256 = hashlib.sha256(content).hexdigest()
             cached = cache.get(sha256, converter)
             if cached is None:
@@ -123,7 +143,8 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
                 continue
             else:
                 paragraphs, title = cached.paragraphs, cached.title
-            pending.append((key, relative, content, sha256, converter, paragraphs, title))
+            when = dating.date(dating.RawUnit(path=relative, kind="source", content=content, paragraphs=paragraphs))
+            pending.append((key, when, sha256, converter, paragraphs, title))
 
         # Every unit's conversion is cached above under its current converter
         # id; only now is it safe to sweep the rows a bumped converter (or a
@@ -134,8 +155,7 @@ def sync(roots: Sequence[str | Path], ledger: Ledger, *, cache_db: str | Path | 
     ids = ledger.register([key for key, *_ in pending])
     records = []
     aligned: list[AlignResult] = []
-    for key, relative, content, sha256, converter, paragraphs, title in pending:
-        when = dating.date(dating.RawUnit(path=relative, kind="source", content=content, paragraphs=paragraphs))
+    for key, when, sha256, converter, paragraphs, title in pending:
         aligned.append(ledger.align(key, sha256, paragraphs, converter=converter, at=at, dated=dated))
         ref = refs.render(refs.SourceRef(ids[key]))
         # An empty-Subject email with no body words converts to an empty
@@ -171,23 +191,35 @@ def _dedupe_roots(roots: Sequence[str | Path]) -> list[Path]:
     return list(seen)
 
 
-def _walk(roots: list[Path]) -> list[tuple[str, str, Path]]:
-    """``(ledger key, corpus-relative path, absolute path)`` for every file
-    under every root, in sorted key order. The key is the root index plus
-    the relative path (a unit's identity across runs); the relative path
-    alone is what the normalizer and the dating module see."""
+def _walk(roots: list[Path], root_ids: dict[str, int], skipped: list[Skip], known) -> list[tuple[str, str, Path]]:
+    """Skip missing entries; access failures abort. Preserve legacy duplicate keys."""
     units = []
-    for index, root in enumerate(roots):
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            parts = path.relative_to(root).parts
-            if any(part.startswith(".") for part in parts):
-                continue
-            if "cache" in parts[:-1]:
-                continue
-            relative = "/".join(parts)
-            units.append((f"{index:03d}/{relative}", relative, path))
+    seen = set()
+
+    def failed(error):
+        raise error
+
+    for root in sorted(roots, key=lambda p: root_ids[str(p)]):
+        index = root_ids[str(root)]
+        for folder, directories, files in os.walk(root, onerror=failed, followlinks=False):
+            directories[:] = sorted(d for d in directories if not d.startswith(".") and d != "cache")
+            for name in sorted(files):
+                if name.startswith("."):
+                    continue
+                path = Path(folder) / name
+                relative = path.relative_to(root).as_posix()
+                key = f'{index:03d}/{relative}'
+                try:
+                    path.lstat()
+                    stat = path.stat()
+                except FileNotFoundError:
+                    skipped.append(Skip(relative, 'dangling link or file disappeared during scan'))
+                    continue
+                identity = (stat.st_dev, stat.st_ino) if stat.st_ino else str(path.resolve())
+                if identity in seen and key not in known:
+                    continue
+                seen.add(identity)
+                units.append((key, relative, path))
     units.sort(key=lambda unit: unit[0])
     return units
 
@@ -217,7 +249,8 @@ class _ConversionCache:
     def __init__(self, cache_db: str | Path | None):
         path = Path(cache_db) if cache_db is not None else _default_cache_db()
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path))
+        self._conn = sqlite3.connect(str(path), timeout=60)
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS conversions ("
             "sha256 TEXT NOT NULL, converter TEXT NOT NULL, "

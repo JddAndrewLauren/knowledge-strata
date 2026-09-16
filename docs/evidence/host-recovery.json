@@ -1,0 +1,152 @@
+{
+  "environment": "Linux/WSL2, installed wheel, real BGE embeddings, two separate Claude Code print sessions",
+  "method": "Explicit MCP config and packaged skill appended to the host prompt; no session persistence. This is not an unassisted clean-host installation test.",
+  "sessions": [
+    {
+      "session": 1,
+      "exit_code": 0,
+      "seconds": 23.31,
+      "is_error": false,
+      "result": "Priya said the cutoff was eleven o'clock, and yes, Marcus disagreed. He said it was noon.\n\n**Priya, 2001-06-01** (SRC-000001 p2):\n> Priya confirmed the trade submission cutoff was eleven oclock.\n\n**Marcus, 2001-06-02** (SRC-000002 p2):\n> Marcus disputed the cutoff. He said submissions closed at noon.\n\nNothing in the archive settles which time is right. I listed everything in the archive: it holds only these two records, both from June 2001, and I read both in full.\n\n**Notes:** I saved both quotes with their refs in `notes/project.md` and marked the conflict as unresolved. I also added an unfinished task there to check July changes. There are no July records yet, so that check can't be done until new material is added.\n\nAs you asked, I didn't change any source files, commit anything or use subagents.",
+      "usage": {
+        "input_tokens": 12,
+        "cache_creation_input_tokens": 13136,
+        "cache_read_input_tokens": 57802,
+        "output_tokens": 1130,
+        "output_tokens_details": {
+          "thinking_tokens": 34
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 13136,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 2,
+            "output_tokens": 293,
+            "cache_read_input_tokens": 12626,
+            "cache_creation_input_tokens": 510,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 510
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 978,
+          "outputTokens": 13,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.0010429999999999999,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        },
+        "claude-opus-5[1m]": {
+          "inputTokens": 12,
+          "outputTokens": 1130,
+          "cacheReadInputTokens": 57802,
+          "cacheCreationInputTokens": 13136,
+          "webSearchRequests": 0,
+          "costUSD": 0.188571,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 64000,
+          "thinkingTokens": 34,
+          "canonicalModel": "claude-opus-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        }
+      },
+      "permission_denials": []
+    },
+    {
+      "session": 2,
+      "exit_code": 0,
+      "seconds": 14.56,
+      "is_error": false,
+      "result": "I found the saved finding and the unfinished task in `notes/project.md`, and both quotes match their sources word for word.\n\n**The cutoff finding (June 2001).** The two sources disagree, and the notes say nothing settles it:\n\n- **2001-06-01:** \"Priya confirmed the trade submission cutoff was eleven oclock.\" (SRC-000001 p2)\n- **2001-06-02:** \"Marcus disputed the cutoff. He said submissions closed at noon.\" (SRC-000002 p2)\n\nI read both paragraphs again and they match the notes exactly. \"oclock\" is spelled that way in the source. I'm leaving the conflict open rather than picking a time.\n\n**Unfinished task.** The notes list one open to-do, not started: \"Check July changes to the cutoff.\" At corpus revision 2, when the notes were written, the archive had no July sources.\n\n**Current check.** I ran one search for \"cutoff\" instead of rereading the archive. The corpus is still at revision 2. The only hits are the two June 2001 sources and the project note itself, so there's still nothing from July and the task stays open. The search index number has changed from `-2` to `-3`, but the sources themselves haven't.\n\nI didn't change any files, commit anything or use subagents.",
+      "usage": {
+        "input_tokens": 6,
+        "cache_creation_input_tokens": 2135,
+        "cache_read_input_tokens": 29572,
+        "output_tokens": 639,
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 2135,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 2,
+            "output_tokens": 410,
+            "cache_read_input_tokens": 10356,
+            "cache_creation_input_tokens": 1054,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 1054
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 954,
+          "outputTokens": 12,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.001014,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        },
+        "claude-opus-5[1m]": {
+          "inputTokens": 6,
+          "outputTokens": 639,
+          "cacheReadInputTokens": 29572,
+          "cacheCreationInputTokens": 2135,
+          "webSearchRequests": 0,
+          "costUSD": 0.05214100000000001,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 64000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-opus-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        }
+      },
+      "permission_denials": []
+    }
+  ],
+  "limitations": [
+    "One two-session journey; reader fan-out, interruptions, and platform installation not demonstrated.",
+    "Per-tool trace/counts were not captured by JSON result mode."
+  ]
+}

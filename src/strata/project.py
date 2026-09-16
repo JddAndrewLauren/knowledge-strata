@@ -1,99 +1,168 @@
-"""strata.project: one project folder (CONTEXT.md "Project") and the
-fresh-as-of-this-call sync over it (design.md "Freshness") that
-:mod:`strata.server` runs before every tool call and :mod:`strata.cli` runs
-by hand for ``strata init`` and ``strata index``.
-
-The walk is the same for both: resolve the corpus roots from the config,
-hand them to the sources adapter, add the ``notes`` folder and the
-manuscript, and give every Record to :meth:`~strata.index.Index.sync`. So
-is the failure rule: a failure partway hands whatever Records were already
-collected to ``index.sync(..., complete=False)`` - real, ledger-durable
-progress, not just a flag - unless the index was already complete, because
-one bad refresh must not retract a project whose first index has already
-finished (design.md "The user's experience" is about a *first* index; a transient
-failure later just leaves the last-known-good, still-complete state). What
-differs is only what each caller prints about it, so nothing here prints.
-"""
-
+"""Project configuration and serialized refresh-before-read runtime."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
+import os
+import errno
+import threading
+import time
+import sqlite3
+from strata import config as project_config
 
-from strata import config
-from strata.corpus import manuscript, notes, sources
-from strata.embeddings import Embedder
+from strata.corpus import sources, notes, manuscript
+from strata.embeddings import CachedEmbedder, FastEmbedEmbedder
 from strata.index import Index
 from strata.ledger import Ledger
-from strata.record import Record
 
 
-@dataclass(frozen=True)
+class RefreshFailed(RuntimeError):
+    """The last snapshot must not be presented as current."""
+
+
+def config(project: Path) -> dict:
+    value = project_config.load(project)
+    return {'corpus': list(value.corpus), 'manuscript': value.manuscript,
+            'chunk_tokens': value.chunk_tokens}
+
+
+def resolve(project: Path, path: str) -> Path:
+    return (project / path).resolve()
+
+
+@contextmanager
+def project_lock(project: Path, *, timeout: float = 2.0):
+    """Bound contention; OS locks release on exit, including interrupted refreshes."""
+    lock = project / '.strata' / 'refresh.lock'
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    with lock.open('a+b') as stream:
+        if os.name == 'nt':
+            import msvcrt
+            if stream.tell() == 0:
+                stream.write(b'0'); stream.flush()
+            stream.seek(0)
+        else:
+            import fcntl
+        while True:
+            try:
+                if os.name == 'nt':
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RefreshFailed('indexing: incomplete; refresh in progress; retry shortly') from error
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        try:
+            yield
+        finally:
+            if os.name == 'nt':
+                stream.seek(0); msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
 class Project:
-    """One project folder's fixed identity: paths plus the one long-lived,
-    thread-safe collaborator (the embedder). ``Ledger`` and ``Index`` hold a
-    ``sqlite3.Connection`` each, so they are opened fresh per sync
-    (:func:`open_index`) instead of living here. ``cache_db`` overrides the
-    conversion cache (``~/.strata/cache/store.db`` when ``None``); tests
-    point it at a temporary file so the hermetic suite never touches a real
-    home directory. The embedder's model files live beside that cache, at
-    ``~/.strata/cache/models/`` (:class:`~strata.embeddings.FastEmbedEmbedder`).
-    """
-
-    folder: Path
-    embedder: Embedder
-    cache_db: Path | None = None
-
-    @property
-    def ledger_path(self) -> Path:
-        return self.folder / ".strata" / "ledger.db"
+    def __init__(self, path: str | Path | None = None, *, folder=None, embedder=None, cache_db=None, cache_dir: str | Path | None = None,
+                 embedder_factory=None, semantic=True, progress=None, lock_timeout=2.0):
+        self.path = Path(path if path is not None else folder).resolve()
+        self.folder = self.path
+        self.cache = Path(cache_dir or os.environ.get('STRATA_CACHE_DIR') or Path.home() / '.strata' / 'cache')
+        self.cache_db = Path(cache_db) if cache_db is not None else self.cache / "store.db"
+        self.factory = (lambda: embedder) if embedder is not None else embedder_factory or (lambda: FastEmbedEmbedder(cache_dir=self.cache / 'models'))
+        self.semantic = semantic
+        self.progress = progress or (lambda message: None)
+        self._embedder = None
+        self._lock = threading.RLock()
+        self.lock_timeout = lock_timeout
 
     @property
-    def index_path(self) -> Path:
-        return self.folder / ".strata" / "cache" / "index.db"
+    def ledger_path(self):
+        return self.path / '.strata' / 'ledger.db'
 
+    @property
+    def index_path(self):
+        return self.path / '.strata' / 'cache' / 'index.db'
 
-@dataclass(frozen=True)
-class SyncOutcome:
-    """What one :func:`sync` did: the Records handed to the index, the
-    sources adapter's report (``None`` if the walk failed before it
-    returned), the failure if any, and whether the index was already
-    complete when the sync began - the fact the callers' messages turn on."""
+    @contextmanager
+    def _refresh_lock(self):
+        deadline = time.monotonic() + self.lock_timeout
+        if not self._lock.acquire(timeout=self.lock_timeout):
+            raise RefreshFailed('indexing: incomplete; refresh in progress; retry shortly')
+        try:
+            with project_lock(self.path, timeout=max(0, deadline - time.monotonic())):
+                yield
+        finally:
+            self._lock.release()
 
-    records: tuple[Record, ...]
-    source_report: sources.SyncReport | None
-    error: Exception | None
-    was_complete: bool
+    @contextmanager
+    def current(self, *, legacy_roots=None):
+        with self._refresh_lock():
+            settings = config(self.path)
+            cache = self.path / '.strata' / 'cache'
+            cache.mkdir(parents=True, exist_ok=True)
+            ledger = Ledger(self.path / '.strata' / 'ledger.db')
+            index = None
+            try:
+                self.was_complete = False
+                if self.index_path.exists():
+                    connection = sqlite3.connect(self.index_path)
+                    try:
+                        row = connection.execute("SELECT value FROM meta WHERE key='indexing'").fetchone()
+                        self.was_complete = bool(row and row[0] == 'complete')
+                    except sqlite3.OperationalError:
+                        pass  # A partial index still needs model/recovery progress.
+                    finally:
+                        connection.close()
+                if self._embedder is None:
+                    self.progress('Loading embedding model; first use may download model files. Retry strata index if interrupted.')
+                    self._embedder = CachedEmbedder(self.factory(), self.cache_db)
+                index = Index(cache / 'index.db', ledger=ledger, embedder=self._embedder,
+                              semantic=self.semantic, chunk_tokens=settings.get('chunk_tokens', 80_000),
+                              reply_token_budget=7980)
+                # Persist incomplete status before any potentially failing work.
+                self.was_complete = index.indexing_state == "complete"
+                index.mark_complete(False)
+                roots = [resolve(self.path, root) for root in settings['corpus']]
+                report = sources.sync(roots, ledger, cache_db=self.cache_db,
+                                      legacy_roots=legacy_roots, progress=self.progress)
+                records = list(report.records) + list(notes.read(self.path / 'notes'))
+                if settings.get('manuscript'):
+                    folder = resolve(self.path, settings['manuscript'])
+                    if not folder.is_dir():
+                        raise OSError(f'manuscript folder is unavailable: {folder}')
+                    records.extend(manuscript.read(folder).records)
+                self.progress(f'Indexing {len(records)} records')
+                index.sync(records)
+                self.report = report
+                self.progress(f'Index complete: {len(records)} records, {len(report.skipped)} skips, {len(report.deleted)} retired sources')
+            except BaseException as error:
+                if index:
+                    index.mark_complete(False)
+                    index.close()
+                ledger.close()
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    raise
+                raise RefreshFailed(f'indexing: incomplete; refresh failed: {error}. Fix the cause and retry; no current results were served.') from error
+            try:
+                yield index
+            finally:
+                index.close()
+                ledger.close()
 
+    def refresh(self, *, legacy_roots=None):
+        with self.current(legacy_roots=legacy_roots) as index:
+            return {'records': len(self.report.records), 'skipped': len(self.report.skipped),
+                    'corpus_revision': index._ledger.corpus_revision()}
 
-def open_index(project: Project, cfg: config.ProjectConfig) -> tuple[Ledger, Index]:
-    """A fresh ``Ledger`` and ``Index`` over ``project``; the caller closes
-    both when its call is done."""
-    ledger = Ledger(project.ledger_path)
-    project.index_path.parent.mkdir(parents=True, exist_ok=True)
-    index = Index(project.index_path, ledger=ledger, embedder=project.embedder, chunk_tokens=cfg.chunk_tokens)
-    return ledger, index
+    def search(self, **arguments):
+        with self.current() as index:
+            return index.search(**arguments)
 
-
-def sync(project: Project, cfg: config.ProjectConfig, ledger: Ledger, index: Index) -> SyncOutcome:
-    """Walk the corpus roots and the ``notes``/manuscript folders and hand
-    every Record to ``index.sync`` - "fresh as of this call". See the module
-    docstring for the failure rule."""
-    was_complete = index.indexing_state == "complete"
-    records: list[Record] = []
-    source_report: sources.SyncReport | None = None
-    try:
-        source_report = sources.sync(cfg.corpus_roots(project.folder), ledger, cache_db=project.cache_db)
-        records.extend(source_report.records)
-        notes_folder = project.folder / "notes"
-        if notes_folder.is_dir():
-            records.extend(notes.read(notes_folder))
-        manuscript_path = cfg.manuscript_path(project.folder)
-        if manuscript_path is not None:
-            records.extend(manuscript.read(manuscript_path).records)
-    except Exception as error:
-        if not was_complete:
-            index.sync(records, complete=False)
-        return SyncOutcome(tuple(records), source_report, error, was_complete)
-    index.sync(records, complete=True)
-    return SyncOutcome(tuple(records), source_report, None, was_complete)
+    def read(self, **arguments):
+        with self.current() as index:
+            return index.read(**arguments)

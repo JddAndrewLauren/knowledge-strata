@@ -407,11 +407,11 @@ def test_interrupted_first_index_resumes_and_a_server_call_in_between_reports_in
     status = cli.cmd_index(project, embedder=FakeEmbedder())
     assert status != 0  # the CLI call itself is interrupted
 
-    # "a.txt" (sorted before the failing "b.txt") already has a live anchor,
-    # durably committed - the resumable state, independent of index.db.
+    # "a.txt" (sorted before the failing "b.txt") was aligned, but that change
+    # is rolled back with the rest of the failed scan; retry allocates it safely.
     ledger = Ledger(project / ".strata" / "ledger.db")
     try:
-        assert ledger.live_anchors("SRC-000001") == [1, 2]  # "16 May 2001" and "First paragraph."
+        assert ledger.live_anchors("SRC-000001") == []  # "16 May 2001" and "First paragraph."
     finally:
         ledger.close()
 
@@ -424,7 +424,7 @@ def test_interrupted_first_index_resumes_and_a_server_call_in_between_reports_in
             return await mcp_client.call_tool("search", {})
 
     result = asyncio.run(_search())
-    assert not result.is_error
+    assert result.is_error
     text = result.content[0].text
     assert "incomplete" in text
 
@@ -446,7 +446,8 @@ def test_index_prints_one_drift_line_per_changed_record_and_nothing_else(project
     status, out, err = _index(project)  # first index: progress, not drift
     assert status == 0
     assert "first index complete" in out
-    assert err == ""
+    assert "Converting 2/2" in err
+    assert "Index complete: 2 records" in err
 
     status, out, err = _index(project)  # nothing changed: nothing printed
     assert status == 0

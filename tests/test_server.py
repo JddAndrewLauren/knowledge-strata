@@ -263,12 +263,10 @@ def test_first_index_interrupted_reports_incomplete_with_progress_and_completes_
 
     monkeypatch.setattr(manuscript, "read", _boom)  # the walk lives in strata.project; the adapter is shared
 
-    text = _text(_call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"}))
-    assert _field(text, "indexing").startswith("incomplete")
-    assert "2" in _field(text, "indexing")  # progress: the source and the digest note
-    assert _field(text, "covered") == "none"  # design.md: no coverage while a first index is incomplete
-    # The swallowed failure is one plain stderr line, not a repr (the CLI's form).
-    assert "strata: sync failed after 2 records: injected failure mid-sync" in capsys.readouterr().err
+    result = _call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"})
+    text = _error_text(result)
+    assert "indexing: incomplete" in text
+    assert "no current results were served" in text
 
     monkeypatch.undo()
     text2 = _text(_call(project, "search", {"from": "2001-05-01", "to": "2001-05-31"}))

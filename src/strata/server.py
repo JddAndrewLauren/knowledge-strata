@@ -7,28 +7,17 @@ One local, stdio MCP server over one project folder, exposing exactly
 1,660 lines): search never returns whole documents, read never summarizes.
 No write tools, ever.
 
-**Fresh as of this call** (design.md "Freshness"): before answering, every
-call runs :func:`strata.project.sync` - the walk over the corpus roots and
-the ``notes``/manuscript folders that the CLI shares - so the reply reflects
-the project folder as it is right now. Whether that runs
-per call or behind a file watcher is an implementation choice behind the
-seam (design.md); per call is where this issue starts, and it is the first
-real-corpus failure to watch for - a per-call stat-walk over a large real
-archive is too slow to feel invisible.
+**Fresh as of this call:** every tool runs the shared ``Project.current``
+refresh while holding the project lock. Failed refreshes return an explicit
+incomplete tool error, never stale results presented as current. SQLite
+connections are opened and closed within the tool's worker thread.
 
-Sync ``def`` tools run on a worker thread the SDK picks per call
-(docs/research/python-stack.md), not necessarily the same thread twice, so
-nothing here keeps a ``sqlite3`` connection open across calls: ``Ledger``
-and ``Index`` are opened fresh inside every call and closed before it
-returns. Only the embedder - not a sqlite object - is built once, outside
-any call, and reused.
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, TypeVar
 
@@ -38,46 +27,21 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from strata import config, refs
-from strata.embeddings import FastEmbedEmbedder
-from strata.index import BadRef, CursorError, Index, SearchReply, estimate_tokens
-from strata.project import Project, open_index, sync
+from strata.index import BadRef, CursorError, Index
+from strata.project import Project, RefreshFailed
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 # The model-visible errors (design.md "Two tools"): a bad ref, a conflicting or
 # invalidated cursor, a project with no config. Every other exception - an
 # incidental ValueError included - is left for the SDK to sanitize.
-_MODEL_VISIBLE = (BadRef, refs.BadRef, CursorError, config.ConfigError)
+_MODEL_VISIBLE = (BadRef, refs.BadRef, CursorError, config.ConfigError, RefreshFailed)
 _T = TypeVar("_T")
 
 
 def _call(project: Project, fn: Callable[[Index], _T]) -> _T:
-    """Open ``Ledger``/``Index`` fresh, sync now, run ``fn(index)``, close -
-    every tool call goes through this so freshness and connect-per-call both
-    hold for every reply. ``config.load`` runs first and is left to raise:
-    with no config there is nothing to sync. A sync failure is swallowed
-    with one stderr line (``strata.project`` has already kept or retracted
-    the index as the failure rule says) so the last-known-good index still
-    answers."""
-    cfg = config.load(project.folder)
-    ledger, index = open_index(project, cfg)
-    try:
-        outcome = sync(project, cfg, ledger, index)
-        if outcome.error is not None:
-            print(f"strata: sync failed after {len(outcome.records)} records: {outcome.error}", file=sys.stderr)
+    """Serialize refresh and query; failed refreshes serve no current results."""
+    with project.current() as index:
         return fn(index)
-    finally:
-        index.close()
-        ledger.close()
-
-
-def _suppress_coverage_if_incomplete(reply: SearchReply) -> SearchReply:
-    """design.md "The user's experience": while a first index is incomplete, the
-    server grants no coverage and implies no completeness, whatever
-    ``covered`` rows a partial index happens to carry."""
-    if reply.indexing == "complete" or not reply.covered:
-        return reply
-    draft = replace(reply, covered=[], reply_tokens=0)
-    return replace(draft, reply_tokens=estimate_tokens(draft.text()))
 
 
 def build_server(project: Project) -> MCPServer:
@@ -110,7 +74,7 @@ def build_server(project: Project) -> MCPServer:
             )
         except _MODEL_VISIBLE as error:
             raise ToolError(str(error)) from error
-        return _suppress_coverage_if_incomplete(reply).text()
+        return reply.text()
 
     @mcp.tool(title="Read verbatim text", annotations=_READ_ONLY, structured_output=False)
     def read(ref: str = "", cursor: str | None = None) -> str:
@@ -119,10 +83,10 @@ def build_server(project: Project) -> MCPServer:
         summary. ``cursor`` alone resumes a prior read's exact position;
         ``ref`` may be omitted with it, or must match."""
         try:
-            reply = _call(project, lambda index: index.read(ref=ref, cursor=cursor))
+            state, reply = _call(project, lambda index: (index.indexing_state, index.read(ref=ref, cursor=cursor)))
         except _MODEL_VISIBLE as error:
             raise ToolError(str(error)) from error
-        return reply.text()
+        return f"indexing: {state}\n" + reply.text()
 
     return mcp
 
@@ -134,9 +98,17 @@ def main(argv: list[str] | None = None) -> int:
     if len(argv) != 2 or argv[0] != "serve":
         print("usage: strata serve <project-folder>", file=sys.stderr)
         return 2
-    project = Project(folder=Path(argv[1]).resolve(), embedder=FastEmbedEmbedder())
+    project = Project(folder=Path(argv[1]).resolve())
     build_server(project).run(transport="stdio")
     return 0
+
+
+# Programmatic runtime entry points used by integration/stdio journeys.
+create_server = build_server
+
+
+def run(project: Project):
+    build_server(project).run(transport="stdio")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ refreshes) the project folder named in design.md "The user's experience":
 ``.strata/config.yaml``, ``.gitignore``, ``.mcp.json``, ``.claude/
 settings.json``, ``notes/project.md``, the git repository, the user-level
 skill and reader agent, then the first index. ``strata index`` runs the same
-fresh-as-of-this-call sync the server runs per call (:func:`strata.project.sync`)
+fresh-as-of-this-call sync the server runs per call (:meth:`strata.project.Project.current`)
 by hand and prints drift.
 
 Flags are the whole truth (CONTEXT.md): every ``strata init`` call that
@@ -23,32 +23,165 @@ is the one error case (design.md: "the one line to type").
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import yaml
 import shutil
 import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
 
-from strata import config, project
-from strata.embeddings import Embedder, FastEmbedEmbedder
+from strata import config
+from strata.embeddings import Embedder
+from strata.project import Project, RefreshFailed, project_lock, resolve
 
-_GITIGNORE_LINE = ".strata/cache/"
-_ALLOWED_PERMISSIONS = (
-    "mcp__strata__search",
-    "mcp__strata__read",
-    "Bash(git add:*)",
-    "Bash(git commit:*)",
-)
 _GIT_IDENTITY_FALLBACK = (("user.name", "strata"), ("user.email", "strata@localhost"))
 _COMMIT_MESSAGE = "strata init"
 _USAGE = "usage: strata init [--corpus PATH ...] [--manuscript PATH] | strata index | strata serve <project-folder>"
+
+
+def _atomic_write(path: Path, text: str):
+    if path.exists() and path.read_text(encoding='utf-8') == text:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8', newline='\n') as stream:
+            stream.write(text); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _json(path: Path):
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(value, dict):
+        raise ValueError(f'{path} must contain a JSON object')
+    return value
+
+
+def _resource(name: str):
+    assets = resources.files('strata') / 'assets'
+    path = assets / ('skill/SKILL.md' if name == 'SKILL.md' else 'agents/strata-reader.md')
+    return path.read_text(encoding='utf-8')
+
+
+def initialize(project: str | Path, *, corpus=None, manuscript=None, host_home=None, replace_paths=False):
+    project = Path(project).resolve()
+    project.mkdir(parents=True, exist_ok=True)
+    with project_lock(project):
+        config_path = project / '.strata' / 'config.yaml'
+        settings = (yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}) if config_path.exists() else {}
+        if config_path.exists():
+            config.load(project)
+        if corpus is not None:
+            settings['corpus'] = list(corpus)
+        if replace_paths:
+            settings.pop('manuscript', None)
+        if manuscript is not None:
+            settings['manuscript'] = manuscript
+        config.validate(settings)
+        if not settings.get('corpus'):
+            raise ValueError('first initialization requires --corpus PATH')
+        for raw in settings['corpus']:
+            root = resolve(project, raw)
+            if not root.is_dir():
+                raise ValueError(f'corpus root is unavailable: {root}')
+            if project.is_relative_to(root):
+                raise ValueError('the project cannot be inside a corpus root (its own notes would become sources)')
+        if settings.get('manuscript') and not resolve(project, settings['manuscript']).is_dir():
+            raise ValueError('manuscript must name an existing folder')
+        mcp_path, permissions_path = project / '.mcp.json', project / '.claude' / 'settings.json'
+        mcp, permissions = _json(mcp_path), _json(permissions_path)
+        servers = mcp.setdefault('mcpServers', {})
+        if not isinstance(servers, dict):
+            raise ValueError('mcpServers must be an object')
+        servers['strata'] = {'command': 'strata', 'args': ['serve', str(project)]}
+        rules = permissions.setdefault('permissions', {})
+        if not isinstance(rules, dict) or not isinstance(rules.setdefault('allow', []), list):
+            raise ValueError('permissions.allow must be a list')
+        for rule in ('mcp__strata__search', 'mcp__strata__read', 'Bash(git add:*)', 'Bash(git commit:*)'):
+            if rule not in rules['allow']:
+                rules['allow'].append(rule)
+        if settings.get('manuscript'):
+            directories = rules.setdefault('additionalDirectories', [])
+            if not isinstance(directories, list):
+                raise ValueError('permissions.additionalDirectories must be a list')
+            directory = str(resolve(project, settings['manuscript']))
+            if directory not in directories:
+                directories.append(directory)
+        enabled = permissions.setdefault('enabledMcpjsonServers', [])
+        if not isinstance(enabled, list):
+            raise ValueError('enabledMcpjsonServers must be a list')
+        if 'strata' not in enabled:
+            enabled.append('strata')
+        skill, reader = _resource('SKILL.md'), _resource('strata-reader.md')
+        existing = subprocess.run(['git', '-C', str(project), 'rev-parse', '--show-toplevel'],
+                                  capture_output=True, text=True)
+        if existing.returncode:
+            subprocess.run(['git', 'init', str(project)], check=True, capture_output=True)
+        _atomic_write(config_path, yaml.safe_dump(settings, sort_keys=False))
+        _atomic_write(mcp_path, json.dumps(mcp, indent=2) + '\n')
+        _atomic_write(permissions_path, json.dumps(permissions, indent=2) + '\n')
+        ignore = project / '.gitignore'
+        contents = ignore.read_text(encoding='utf-8') if ignore.exists() else ''
+        for entry in ('.strata/cache/', '.strata/refresh.lock'):
+            if entry not in contents.splitlines():
+                contents = contents.rstrip('\n') + '\n' + entry + '\n'
+        _atomic_write(ignore, contents.lstrip('\n'))
+        overview = project / 'notes' / 'project.md'
+        if not overview.exists():
+            _atomic_write(overview, f'# {project.name}\n')
+        host = Path(host_home) if host_home else Path.home() / '.claude'
+        _atomic_write(host / 'skills' / 'strata' / 'SKILL.md', skill)
+        _atomic_write(host / 'agents' / 'strata-reader.md', reader)
+    return project
+
 
 
 # -- entry point ---------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print('strata: indexing interrupted; run strata index to retry', file=sys.stderr)
+        return 130
+    except (ValueError, OSError, RefreshFailed) as error:
+        message = f'strata: {error}'.encode('ascii', errors='backslashreplace').decode('ascii')
+        print(message, file=sys.stderr)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ['--help'] or argv == ['-h']:
+        print(_USAGE)
+        return 0
+    folder = Path.cwd()
+    argv = list(argv)
+    if '--project' in argv:
+        position = argv.index('--project')
+        if position + 1 >= len(argv):
+            print('--project needs a path', file=sys.stderr)
+            return 2
+        folder = Path(argv[position + 1]).resolve()
+        del argv[position:position + 2]
+        if argv == ['serve']:
+            argv.append(str(folder))
+    legacy_roots = []
+    while '--legacy-root' in argv:
+        position = argv.index('--legacy-root')
+        if position + 1 >= len(argv):
+            print('--legacy-root needs a path', file=sys.stderr)
+            return 2
+        legacy_roots.append(resolve(folder, argv[position + 1]))
+        del argv[position:position + 2]
     if argv and argv[0] == "serve":
         from strata import server
 
@@ -59,9 +192,9 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as error:
             print(f"strata: {error}", file=sys.stderr)
             return 2
-        return cmd_init(Path.cwd(), corpus=corpus, manuscript=manuscript_path)
+        return cmd_init(folder, corpus=corpus, manuscript=manuscript_path, legacy_roots=legacy_roots or None)
     if argv == ["index"]:
-        return cmd_index(Path.cwd())
+        return cmd_index(folder, legacy_roots=legacy_roots or None)
     print(_USAGE, file=sys.stderr)
     return 2
 
@@ -97,11 +230,16 @@ def cmd_init(
     corpus: list[str],
     manuscript: str | None,
     embedder: Embedder | None = None,
+    legacy_roots=None,
 ) -> int:
     """``strata init`` in ``folder`` (design.md "The user's experience"),
     with whatever ``--corpus``/``--manuscript`` flags were typed this run.
     ``embedder`` is a test seam (``None`` builds the real
     :class:`~strata.embeddings.FastEmbedEmbedder`, as `strata.server` does)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    owned = ['.gitignore', '.mcp.json', '.claude/settings.json', '.strata/config.yaml',
+             '.strata/ledger.db', 'notes/project.md']
+    before = {name: (folder / name).read_bytes() if (folder / name).exists() else None for name in owned}
     config_path = folder / ".strata" / "config.yaml"
     initialized = config_path.exists()
     any_flag_given = bool(corpus) or manuscript is not None
@@ -116,100 +254,14 @@ def cmd_init(
         print("strata: git was not found on PATH; install git and rerun strata init", file=sys.stderr)
         return 1
 
-    if any_flag_given:
-        if not corpus and initialized:
-            corpus = list(config.load(folder).corpus)
-        config.write(folder, corpus=corpus, manuscript=manuscript)
+    initialize(folder, corpus=list(corpus) if corpus else None,
+               manuscript=manuscript, replace_paths=any_flag_given)
     cfg = config.load(folder)
 
-    _ensure_gitignore(folder)
-    _merge_mcp_json(folder)
-    _merge_claude_settings(folder)
-    _ensure_project_note(folder)
-    _install_user_level_assets()
     _ensure_git_repo(folder)
-
-    status = _sync_project(folder, cfg, report_drift=False, embedder=embedder)
-    _git_commit_if_changed(folder)
+    status = _sync_project(folder, cfg, report_drift=False, embedder=embedder, legacy_roots=legacy_roots)
+    _git_commit_if_changed(folder, before)
     return status
-
-
-def _ensure_gitignore(folder: Path) -> None:
-    path = folder / ".gitignore"
-    if not path.exists():
-        path.write_text(_GITIGNORE_LINE + "\n", encoding="utf-8")
-        return
-    text = path.read_text(encoding="utf-8")
-    if _GITIGNORE_LINE in text.splitlines():
-        return
-    if text and not text.endswith("\n"):
-        text += "\n"
-    path.write_text(text + _GITIGNORE_LINE + "\n", encoding="utf-8")
-
-
-def _read_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-def _merge_mcp_json(folder: Path) -> None:
-    path = folder / ".mcp.json"
-    data = _read_json(path)
-    servers = data.get("mcpServers")
-    if not isinstance(servers, dict):
-        servers = {}
-    servers["strata"] = {"command": "strata", "args": ["serve", str(folder.resolve())]}
-    data["mcpServers"] = servers
-    _write_json(path, data)
-
-
-def _merge_claude_settings(folder: Path) -> None:
-    path = folder / ".claude" / "settings.json"
-    data = _read_json(path)
-    permissions = data.get("permissions")
-    if not isinstance(permissions, dict):
-        permissions = {}
-    allow = permissions.get("allow")
-    if not isinstance(allow, list):
-        allow = []
-    for permission in _ALLOWED_PERMISSIONS:
-        if permission not in allow:
-            allow.append(permission)
-    permissions["allow"] = allow
-    data["permissions"] = permissions
-    _write_json(path, data)
-
-
-def _ensure_project_note(folder: Path) -> None:
-    path = folder / "notes" / "project.md"
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"# {folder.name}\n", encoding="utf-8")
-
-
-def _write_if_changed(path: Path, content: str) -> None:
-    """Rewrite ``path`` only when its content differs, so an identical file
-    keeps its mtime (design.md "refresh"; issue #33's acceptance: an
-    unaltered installed skill is left untouched, an altered one restored)."""
-    if path.exists() and path.read_text(encoding="utf-8") == content:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-
-def _install_user_level_assets() -> None:
-    assets = resources.files("strata") / "assets"
-    skill_text = (assets / "skill" / "SKILL.md").read_text(encoding="utf-8")
-    reader_text = (assets / "agents" / "strata-reader.md").read_text(encoding="utf-8")
-    _write_if_changed(Path.home() / ".claude" / "skills" / "strata" / "SKILL.md", skill_text)
-    _write_if_changed(Path.home() / ".claude" / "agents" / "strata-reader.md", reader_text)
 
 
 def _git(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -231,30 +283,34 @@ def _ensure_git_repo(folder: Path) -> None:
             _git(["config", key, fallback], cwd=folder)
 
 
-def _git_commit_if_changed(folder: Path) -> None:
-    """Stage everything under ``folder`` (never outside it - corpus roots
-    are external, CONTEXT.md "Corpus") and commit only if that changed
-    something under ``folder`` (design.md "git": one commit first run,
-    "commit only if something changed" on a refresh). The check is scoped
-    to the folder: when it sits inside a larger repository, that repo's
-    unrelated dirtiness must not trigger a ``strata init`` commit."""
-    _git(["add", "-A", "."], cwd=folder)
-    status = _git(["status", "--porcelain", "--", "."], cwd=folder)
-    if status.stdout.strip():
-        _git(["commit", "-m", _COMMIT_MESSAGE], cwd=folder)
+def _git_commit_if_changed(folder: Path, before: dict[str, bytes | None]) -> None:
+    """Commit only setup-owned changes and preserve all unrelated staging."""
+    changed = [name for name, old in before.items()
+               if (folder / name).exists() and (folder / name).read_bytes() != old]
+    if not changed:
+        return
+    staged = _git(['diff', '--cached', '--name-only'], cwd=folder)
+    if staged.stdout.strip():
+        print('strata: setup saved; existing staged changes left untouched, no commit made', file=sys.stderr)
+        return
+    result = _git(['add', '--', *changed], cwd=folder)
+    if result.returncode == 0:
+        result = _git(['commit', '--only', '-m', _COMMIT_MESSAGE, '--', *changed], cwd=folder)
+    if result.returncode:
+        print('strata: setup saved but commit failed; changes retained', file=sys.stderr)
 
 
 # -- strata index ------------------------------------------------------------------
 
 
-def cmd_index(folder: Path, *, embedder: Embedder | None = None) -> int:
+def cmd_index(folder: Path, *, embedder: Embedder | None = None, legacy_roots=None) -> int:
     """``strata index``: sync ``folder`` by hand (design.md "cli")."""
     try:
         cfg = config.load(folder)
     except config.ConfigError as error:
         print(f"strata: {error}", file=sys.stderr)
         return 1
-    return _sync_project(folder, cfg, report_drift=True, embedder=embedder)
+    return _sync_project(folder, cfg, report_drift=True, embedder=embedder, legacy_roots=legacy_roots)
 
 
 def _sync_project(
@@ -263,42 +319,28 @@ def _sync_project(
     *,
     report_drift: bool,
     embedder: Embedder | None,
+    legacy_roots=None,
 ) -> int:
-    """Fresh-as-of-this-call sync (design.md "Freshness"), driven by the CLI
-    instead of a live server call: :func:`strata.project.sync`, the walk and
-    failure rule the server runs per call, with the CLI's own words for the
-    outcome. A failure during a still-incomplete first index leaves real,
-    ledger-durable progress behind and is resumable because
-    :meth:`~strata.ledger.Ledger.align` is a per-unit no-op on unchanged
-    content next time; a failure after the first index has already finished
-    never retracts that last-good, complete index.
+    """CLI entry to the same serialized refresh used by the server.
 
-    Prints progress (units seen, converted, embedded paragraphs) while the
-    first index is not yet complete; once it is, ``strata index`` prints one
-    drift line per changed source record and nothing else on success
-    (CONTEXT.md "Drift") when ``report_drift`` is set - ``strata init``'s own
-    refresh sync stays quiet, its output reserved for setup.
+    First sync reports progress; later successful index calls report only drift.
+    Any refresh failure marks the index incomplete and keeps the last snapshot
+    unserved until a successful retry reconciles it with the durable ledger.
     """
-    proj = project.Project(folder=folder, embedder=embedder or FastEmbedEmbedder())
-    ledger, index = project.open_index(proj, cfg)
+    proj = Project(folder=folder, embedder=embedder)
+    def progress(message):
+        if getattr(proj, 'was_complete', None) is not True:
+            print(message.encode('ascii', errors='backslashreplace').decode('ascii'), file=sys.stderr)
+    proj.progress = progress
     try:
-        outcome = project.sync(proj, cfg, ledger, index)
-    finally:
-        index.close()
-        ledger.close()
-
-    if outcome.error is not None:
-        if outcome.was_complete:
-            print(f"strata: sync failed, serving the last complete index: {outcome.error}", file=sys.stderr)
-        else:
-            print(f"strata: indexing incomplete: {outcome.error}", file=sys.stderr)
+        with proj.current(legacy_roots=legacy_roots) as index:
+            source_report = proj.report
+            embedded = index._conn.execute('SELECT COUNT(*) FROM paragraphs').fetchone()[0]
+    except RefreshFailed as error:
+        print(f'strata: {error}', file=sys.stderr)
         return 1
-
-    source_report = outcome.source_report
-    assert source_report is not None  # a successful sync always has one
-    if not outcome.was_complete:
+    if not proj.was_complete:
         seen = len(source_report.records) + len(source_report.skipped)
-        embedded = sum(len(record.paragraphs) for record in outcome.records)
         print(
             f"strata: first index complete: {seen} units seen, "
             f"{len(source_report.records)} converted, {embedded} embedded"
