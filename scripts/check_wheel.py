@@ -18,6 +18,6 @@ with tempfile.TemporaryDirectory(prefix='strata-wheel-') as temporary:
     subprocess.run([str(python), '-m', 'strata', '--help'], cwd=root, check=True)
     subprocess.run([str(python), '-c',
                     "from importlib.resources import files; "
-                    "assert files('strata').joinpath('resources/SKILL.md').is_file(); "
-                    "assert files('strata').joinpath('resources/strata-reader.md').is_file(); "
+                    "assert files('strata').joinpath('assets/skill/SKILL.md').is_file(); "
+                    "assert files('strata').joinpath('assets/agents/strata-reader.md').is_file(); "
                     "from strata.server import create_server"], cwd=root, check=True)

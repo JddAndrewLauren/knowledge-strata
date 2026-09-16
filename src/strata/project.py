@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import os
 import threading
-import yaml
+from strata import config as project_config
 
 from strata.corpus import sources, notes, manuscript
 from strata.embeddings import CachedEmbedder, FastEmbedEmbedder
@@ -18,21 +18,9 @@ class RefreshFailed(RuntimeError):
 
 
 def config(project: Path) -> dict:
-    path = project / '.strata' / 'config.yaml'
-    if not path.is_file():
-        raise ValueError('project is not initialized; run strata init --corpus PATH')
-    value = yaml.safe_load(path.read_text(encoding='utf-8'))
-    if not isinstance(value, dict) or not isinstance(value.get('corpus'), list) or not value['corpus']:
-        raise ValueError('config must contain a nonempty corpus list')
-    for item in value['corpus']:
-        if not isinstance(item, str) or not item:
-            raise ValueError('each corpus root must be a nonempty path')
-    if value.get('manuscript') is not None and not isinstance(value['manuscript'], str):
-        raise ValueError('manuscript must be a path')
-    budget = value.get('chunk_tokens', 80_000)
-    if type(budget) is not int or budget <= 0:
-        raise ValueError('chunk_tokens must be a positive integer')
-    return value
+    value = project_config.load(project)
+    return {'corpus': list(value.corpus), 'manuscript': value.manuscript,
+            'chunk_tokens': value.chunk_tokens}
 
 
 def resolve(project: Path, path: str) -> Path:
@@ -73,15 +61,25 @@ def project_lock(project: Path):
 
 
 class Project:
-    def __init__(self, path: str | Path, *, cache_dir: str | Path | None = None,
+    def __init__(self, path: str | Path | None = None, *, folder=None, embedder=None, cache_db=None, cache_dir: str | Path | None = None,
                  embedder_factory=None, semantic=True, progress=None):
-        self.path = Path(path).resolve()
+        self.path = Path(path if path is not None else folder).resolve()
+        self.folder = self.path
         self.cache = Path(cache_dir or os.environ.get('STRATA_CACHE_DIR') or Path.home() / '.strata' / 'cache')
-        self.factory = embedder_factory or (lambda: FastEmbedEmbedder(cache_dir=self.cache / 'models'))
+        self.cache_db = Path(cache_db) if cache_db is not None else self.cache / "store.db"
+        self.factory = (lambda: embedder) if embedder is not None else embedder_factory or (lambda: FastEmbedEmbedder(cache_dir=self.cache / 'models'))
         self.semantic = semantic
         self.progress = progress or (lambda message: None)
         self._embedder = None
         self._lock = threading.RLock()
+
+    @property
+    def ledger_path(self):
+        return self.path / '.strata' / 'ledger.db'
+
+    @property
+    def index_path(self):
+        return self.path / '.strata' / 'cache' / 'index.db'
 
     @contextmanager
     def current(self, *, legacy_roots=None):
@@ -94,14 +92,15 @@ class Project:
             try:
                 if self._embedder is None:
                     self.progress('Loading embedding model; first use may download model files. Retry strata index if interrupted.')
-                    self._embedder = CachedEmbedder(self.factory(), self.cache / 'store.db')
+                    self._embedder = CachedEmbedder(self.factory(), self.cache_db)
                 index = Index(cache / 'index.db', ledger=ledger, embedder=self._embedder,
                               semantic=self.semantic, chunk_tokens=settings.get('chunk_tokens', 80_000),
                               reply_token_budget=7980)
                 # Persist incomplete status before any potentially failing work.
+                self.was_complete = index.indexing_state == "complete"
                 index.mark_complete(False)
                 roots = [resolve(self.path, root) for root in settings['corpus']]
-                report = sources.sync(roots, ledger, cache_db=self.cache / 'store.db',
+                report = sources.sync(roots, ledger, cache_db=self.cache_db,
                                       legacy_roots=legacy_roots, progress=self.progress)
                 records = list(report.records) + list(notes.read(self.path / 'notes'))
                 if settings.get('manuscript'):

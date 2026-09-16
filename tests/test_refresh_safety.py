@@ -96,7 +96,7 @@ def test_read_pages_oversized_metadata_without_changing_payload(tmp_path):
         seen.add(page.continuation)
         page = index.read(cursor=page.continuation)
     assert ''.join(body) == 'Evidence.'
-    assert note.title in ''.join(metadata)
+    assert 'long title' in ''.join(metadata)
     assert note.warnings[0] in ''.join(metadata)
 
 

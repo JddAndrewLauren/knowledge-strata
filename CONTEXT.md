@@ -18,7 +18,7 @@ Record fields apply.
 
 **Version** - a conversion of a raw unit. A changed file or a bumped converter
 produces version n+1; a converter's hand-bumped integer version travels in its
-id, rendered `name@version` (e.g. `eml@1`), so the bump alone misses the
+id, rendered `name@version` (e.g. `eml@2`), so the bump alone misses the
 conversion cache and versions every unit of that converter. Refs do not carry
 a version, and resolve against the newest.
 
@@ -170,8 +170,8 @@ invalidate navigation, including note edits and cache rebuilds.
 source content, membership, conversion or dating changes, not note/manuscript
 edits or unchanged cache-only rebuilds. Conservative corpus-wide invalidation.
 The ledger remembers the hand-bumped dating ruleset version it last aligned
-under; a bump versions every unit and advances the revision exactly once,
-with no reconversion.
+under; a bump versions every unit, advances the revision, and triggers no
+reconversion.
 
 **Coverage** - credit only for `notes/digest/` with valid `window`,
 `coverage_complete: true` and current `corpus_revision`, after complete

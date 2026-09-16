@@ -31,7 +31,9 @@ It writes `.strata/config.yaml`, registers the server in that folder's
 `.mcp.json`, allowlists the tools and the skill's commits in
 `.claude/settings.json`, makes the folder a git repository if it is not one,
 creates `notes/project.md`, installs the skill and the reader agent at user
-level, and runs the first index. Run again with flags it replaces the paths;
+level, and runs the first index. Run again with flags it replaces the paths
+(`--corpus` replaces the list and drops a manuscript not re-typed; `--manuscript`
+alone keeps the corpus list on file, since an empty corpus cannot be typed);
 run bare in an initialized folder it is the refresh (re-sync, rewrite the
 user-level files). First indexing reports progress and interruption/recovery state.
 Until it completes, every tool reply declares `indexing: incomplete`; partial
@@ -93,6 +95,9 @@ only thing the server does.
     corpus       folder -> Records                (three adapters)
     index        sync(Records); search(); read()  (owns freshness, ranking,
                                                    the header)
+    config       config.yaml -> project settings  (read fresh by server and cli)
+    project      Project + sync                   (the fresh walk shared by
+                                                   server and cli)
     server       two MCP tools over index
     cli          strata init, strata index
     skill        the workflow, read by the session
@@ -271,7 +276,8 @@ boundaries within a paragraph. Fragments preserve every character, punctuation,
 capital and whitespace; concatenating payloads and their preserved separators
 exactly reconstructs the selected stored text. Transport labels are separate
 from text payloads. Cursors retain the selection, document order and offset;
-source anchors remain citations, cursors never are.
+source anchors remain citations, cursors never are. The header's title label
+is capped at the same word-boundary length as a hit's title, display only.
 
 **Revisions.** Every cursor identifies an index revision. Any change to that
 revision, including note edits or a cache rebuild, explicitly invalidates it;
@@ -539,5 +545,5 @@ compact stored selections for oversized refs; metadata fragments are never sourc
 payloads. Model-specific passage embeddings share the per-user conversion store.
 
 The implemented CLI is `strata init`, `strata index`, and `strata serve --project
-PATH`. The stdio server uses the official MCP SDK 1.x. Operational measurements
+PATH`. The stdio server uses the official MCP SDK 2.x. Operational measurements
 and outstanding host/platform acceptance are recorded under `docs/evidence/`.

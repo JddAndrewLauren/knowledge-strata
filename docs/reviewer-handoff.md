@@ -26,11 +26,19 @@ changes separate from the review unless explicitly requested.
 - Invented-fixture integration tests, real-model retrieval evaluation, a two-session
   real-host recovery demonstration, and generated scale measurements.
 
+## Upstream integration
+
+The branch includes main through `dcde410` (#62 and #63). It retains upstream
+MCP 2.x, CLI setup commits, model-cache defaults, converter-cache sweeping, and
+alignment drift reporting. Failed refreshes now return an explicit incomplete
+error rather than exposing old results; source scans roll back as a whole.
+
 ## Start here
 
 Read `README.md`, `docs/evidence/README.md`, and `docs/acceptance.md`. The contract
 is `docs/design.md`, `CONTEXT.md`, and the paragraph-anchor ADR. Skill/reader files
-under `docs/drafts/` remain the canonical files packaged into the wheel.
+under `src/strata/assets/` are packaged into the wheel; `docs/drafts/` holds
+the matching workflow drafts.
 
 Inspect `src/strata/project.py` and `cli.py` first for the user journey, then the
 transaction changes in `ledger.py`, `corpus/sources.py`, and `index.py`. The new
@@ -48,7 +56,7 @@ regressions are `tests/test_refresh_safety.py` and `tests/test_project_journey.p
    payloads across Unicode and unusually long refs? Check transport labels and
    source quotation boundaries, including the MCP wrapper.
 4. Can initialization or update overwrite unrelated host configuration or project
-   artifacts? Check interpreter registration, external manuscript paths, Windows
+   artifacts? Check CLI registration, external manuscript paths, Windows
    file locking, interruption, and reruns after partial setup.
 5. Are shared embeddings isolated by model and dimension, and safely reused across
    projects/rebuilds? Check concurrent access to the shared conversion/vector DB.
@@ -67,12 +75,15 @@ python scripts/evaluate.py --real-model --output retrieval.json
 python scripts/benchmark.py --records 1000 --output benchmark.json
 ```
 
-The ordinary suite is hermetic and has zero skips. Author validation: 618 tests
-passed on Python 3.12.13 / Linux WSL2; a final targeted index/refresh run passed
-25 tests after the initialization-retry safeguard. Static checks and `git diff
---check` passed. The MCP subprocess test stalled inside the execution sandbox but
+The ordinary suite is hermetic and has zero skips. Before upstream integration,
+618 tests passed on Python 3.12.13 / Linux WSL2. After integration, 675 tests
+passed with zero skips and the configured private-corpus tier deselected. Static
+checks, whitespace checks, wheel build, and isolated wheel startup/resource
+checks passed. The MCP subprocess test stalled inside the execution sandbox but
 passed outside it; do not hide that by skipping the test.
 
+Real-model, host, and scale evidence predates the MCP 2.x upstream integration;
+the final hermetic suite separately checks the integrated SDK transport.
 Real model downloads are opt-in. `STRATA_CACHE_DIR` relocates the disposable user
 cache. Evidence JSON contains invented text and aggregate metrics only. The
 host demonstration used an installed wheel, explicit MCP configuration, and the

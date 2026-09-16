@@ -226,9 +226,11 @@ def _convert_pdf(raw_bytes: bytes) -> Result:
 # --- email ---------------------------------------------------------------------
 
 
-# A folded header's continuation: a CRLF immediately followed by whitespace.
-# Unfolding (RFC 5322) removes the CRLF and keeps that whitespace.
-_FOLD = re.compile(r"\r\n(?=[ \t])")
+# A folded header's continuation: a CRLF or bare LF immediately followed by
+# whitespace (RFC 5322 mandates CRLF, but files that have passed through a
+# text editor on Linux or macOS carry bare LF instead). Unfolding removes the
+# line break and keeps that whitespace.
+_FOLD = re.compile(r"\r?\n(?=[ \t])")
 
 
 def _raw_header(message: Message, name: str) -> str | None:
@@ -438,12 +440,12 @@ CONVERTER_VERSIONS: dict[str, int] = {
     "text": 1,
     "docx": 1,
     "pdf": 1,
-    "eml": 1,
+    "eml": 2,  # issue #53: _FOLD now unfolds bare-LF header folds too
 }
 
 
 def converter_id(suffix: str) -> str | None:
-    """The versioned converter id for a suffix (``eml@1``, ASCII, one ``@``,
+    """The versioned converter id for a suffix (``eml@2``, ASCII, one ``@``,
     no spaces) - what the sources adapter stores in the conversion cache key
     and passes to :meth:`strata.ledger.Ledger.align` as ``converter``. A
     bumped version renders a new id, which misses the cache and produces a

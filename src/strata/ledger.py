@@ -535,7 +535,10 @@ class Ledger:
 
     def corpus_revision(self) -> str:
         """An opaque, durable token that advances whenever a unit's content,
-        membership, converter or dating changes (CONTEXT.md)."""
+        membership, converter or dating changes (CONTEXT.md). Consumers
+        compare it for equality only; it bumps once per changed unit rather
+        than once per sync, so a sync that dies partway still leaves each
+        already-processed unit's new version paired with its own bump."""
         row = self._conn.execute("SELECT token FROM corpus_revision WHERE id = 1").fetchone()
         return str(row["token"])
 

@@ -52,8 +52,11 @@ Setup creates `.strata/config.yaml`, the durable ledger, `notes/project.md`, MCP
 registration, and a project permission allowlist. It installs the packaged skill
 and reader under `~/.claude/`. Existing notes, manuscript, unrelated settings,
 other MCP servers, and permission denies are preserved. Git is initialized when
-needed, but setup does not create a commit or configure a Git identity. The skill
-commits only its task's changes; configure Git identity if commits fail.
+needed. Setup commits its changed setup files when the staging area is empty;
+existing staged changes defer that commit. A local fallback Git identity is set
+when no identity is configured. The skill commits its task's changes.
+When rerunning init with path flags, supply every path to retain: omitted
+manuscript settings are removed.
 
 ## Refresh, update, and recover
 

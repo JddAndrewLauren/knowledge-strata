@@ -73,4 +73,4 @@ Implementation references: [MCP tools](https://modelcontextprotocol.io/specifica
 [official Python SDK](https://github.com/modelcontextprotocol/python-sdk),
 [host MCP configuration](https://code.claude.com/docs/en/mcp), and
 [host permissions](https://code.claude.com/docs/en/permissions). The implementation
-uses the SDK 1.x API (`mcp>=1.26,<2`), not the unreleased API examples on its main branch.
+uses the SDK 2.x API (`mcp>=2.1,<3`), matching the current repository baseline.

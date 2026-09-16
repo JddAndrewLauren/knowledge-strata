@@ -5,11 +5,15 @@ for an unseen proprietary archive or clean installation on every supported OS.
 
 ## Automated correctness
 
-The baseline was 600 passing tests. The final full run passed 618 tests with zero skips. New checks cover root reorder/overlap/migration,
+The baseline was 600 passing tests. The pre-integration full run passed 618 tests with zero skips. New checks cover root reorder/overlap/migration,
 failed and inaccessible scans, reopened rollback, embedding failure, ledger/index
 reconciliation, oversized read metadata and refs, configuration preservation,
 CLI setup, restart recovery, source edits, shared vectors, serialized refreshes,
 and a real MCP SDK client/server stdio exchange.
+
+After integration with main, 675 tests passed with zero skips and the configured
+private-corpus tier deselected. Wheel build and isolated installation/startup
+checks passed with MCP 2.2.0.
 
 Run `pytest -q` after installing `.[dev]`. The implementation run used Python
 3.12.13 on Linux/WSL2. MCP subprocess verification required running outside the
@@ -21,6 +25,9 @@ The wheel was built with `python -m build --wheel`, installed into an isolated
 CLI startup, and real-model indexing. CI now builds and separately installs the
 wheel on its existing Ubuntu/Windows/macOS jobs. Those remote jobs have **not**
 been run as part of this local change.
+
+Real-model, host, and scale measurements below predate integration with main
+`dcde410` and its MCP 2.x transport. See the PR for final integration checks.
 
 ## Real retrieval and host recovery
 

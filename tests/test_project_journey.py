@@ -1,14 +1,12 @@
 """The real adapters/runtime and MCP transport, with no downloaded model."""
 import asyncio
-from datetime import timedelta
 import json
 from pathlib import Path
 import shutil
 import sys
 
 import pytest
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import Client, StdioServerParameters
 from strata.cli import initialize
 from strata.embeddings import CachedEmbedder, FakeEmbedder
 from strata.project import Project, RefreshFailed
@@ -124,21 +122,19 @@ def test_mcp_stdio_initialize_tools_read_and_errors(project):
         params = StdioServerParameters(command=sys.executable,
             args=['-c', script, str(root), str(root.parent / 'mcp-cache')],
             env={'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')})
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=15)) as session:
-                await session.initialize()
-                tools = (await session.list_tools()).tools
-                assert {tool.name for tool in tools} == {'search', 'read'}
-                assert 'from' in tools[0].inputSchema['properties']
-                result = await session.call_tool('search', {'query': 'cutoff', 'from': '2001-06', 'kind': 'source'})
-                assert not result.isError and 'SRC-' in result.content[0].text
-                result = await session.call_tool('read', {'ref': 'notes/project.md'})
-                assert not result.isError and 'indexing: complete' in result.content[0].text
-                invalid = await session.call_tool('search', {'extra': True})
-                assert invalid.isError
-                corpus.rename(corpus.with_name('offline'))
-                failed = await session.call_tool('read', {'ref': 'notes/project.md'})
-                assert failed.isError and 'incomplete' in failed.content[0].text
+        async with Client(params, read_timeout_seconds=15) as session:
+            tools = (await session.list_tools()).tools
+            assert {tool.name for tool in tools} == {'search', 'read'}
+            assert 'from' in tools[0].input_schema['properties']
+            result = await session.call_tool('search', {'query': 'cutoff', 'from': '2001-06', 'kind': 'source'})
+            assert not result.is_error and 'SRC-' in result.content[0].text
+            result = await session.call_tool('read', {'ref': 'notes/project.md'})
+            assert not result.is_error and 'indexing: complete' in result.content[0].text
+            invalid = await session.call_tool('search', {'query': []})
+            assert invalid.is_error
+            corpus.rename(corpus.with_name('offline'))
+            failed = await session.call_tool('read', {'ref': 'notes/project.md'})
+            assert failed.is_error and 'incomplete' in failed.content[0].text
     asyncio.run(journey())
 
 
@@ -165,12 +161,11 @@ def test_cli_init_and_index_use_the_runtime(tmp_path, monkeypatch, capsys):
     (corpus / 'entry.txt').write_text('Evidence.')
     root = tmp_path / 'project'
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path / 'home'))
-    monkeypatch.setattr(cli, 'Project', lambda path, progress=None: Project(
-        path, cache_dir=tmp_path / 'cache', embedder_factory=FakeEmbedder,
-        semantic=False, progress=progress))
+    monkeypatch.setattr(cli, 'Project', lambda folder, **kwargs: Project(
+        folder, cache_dir=tmp_path / 'cache', embedder_factory=FakeEmbedder, semantic=False))
     assert cli.main(['init', '--project', str(root), '--corpus', str(corpus)]) == 0
     assert cli.main(['index', '--project', str(root)]) == 0
-    assert 'Index complete' in capsys.readouterr().err
+    assert 'first index complete' in capsys.readouterr().out
     assert (root / '.strata' / 'ledger.db').exists()
 
 

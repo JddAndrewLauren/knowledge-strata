@@ -1551,7 +1551,7 @@ class Index:
 
     def _read_header_line(self, canonical: str, record_row: sqlite3.Row) -> str:
         date = self._record_date(record_row)
-        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {record_row['title']}"
+        return f"{canonical}  {display_date(date)}  {record_row['kind']}  {cap_at_word_boundary(record_row['title'])}"
 
     def _paragraph_texts(self, ref: str) -> list[str]:
         rows = self._conn.execute("SELECT text FROM paragraphs WHERE ref = ? ORDER BY idx", (ref,)).fetchall()
