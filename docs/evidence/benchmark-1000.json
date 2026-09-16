@@ -1,0 +1,16 @@
+{
+  "records": 1000,
+  "model": "fake-v1",
+  "real_model": false,
+  "python": "3.12.13",
+  "platform": "Linux-6.18.33.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "cpu_count": 16,
+  "cold_seconds": 1.4045,
+  "unchanged_seconds": 0.1796,
+  "one_edit_seconds": 0.2029,
+  "search_after_refresh_seconds": 0.0168,
+  "browse_enumeration_seconds": 0.0447,
+  "browse_pages": 2,
+  "peak_rss_mb": 59.76,
+  "index_bytes": 1622016
+}

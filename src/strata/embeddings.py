@@ -16,6 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Protocol
+from pathlib import Path
+import hashlib
+import sqlite3
+import struct
 
 QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
@@ -98,10 +102,12 @@ class FastEmbedEmbedder:
     model_id = "bge-small-en-v1.5"
     dim = 384
 
-    def __init__(self):
+    def __init__(self, *, cache_dir: str | Path | None = None):
         from fastembed import TextEmbedding
 
-        self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".strata" / "cache" / "models"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=str(cache_dir))
 
     def embed_passages(self, texts: Sequence[str]) -> list[Vector]:
         return [tuple(float(x) for x in vec) for vec in self._model.embed(list(texts))]
@@ -109,3 +115,51 @@ class FastEmbedEmbedder:
     def embed_query(self, text: str) -> Vector:
         vec = next(iter(self._model.embed([QUERY_INSTRUCTION + text])))
         return tuple(float(x) for x in vec)
+
+
+class CachedEmbedder:
+    """Reusable per-user passage vectors; connections stay in the calling thread."""
+
+    def __init__(self, embedder: Embedder, path: str | Path):
+        self._embedder = embedder
+        self.path = Path(path)
+        self.model_id, self.dim = embedder.model_id, embedder.dim
+
+    def embed_query(self, text: str) -> Vector:
+        return self._embedder.embed_query(text)
+
+    def embed_passages(self, texts: Sequence[str]) -> list[Vector]:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path, timeout=60)
+        try:
+            with connection:
+                connection.execute("CREATE TABLE IF NOT EXISTS embeddings (model TEXT, dim INTEGER, hash TEXT, "
+                                   "vector BLOB NOT NULL, PRIMARY KEY(model, dim, hash))")
+                keys = [hashlib.sha256(text.encode('utf-8')).hexdigest() for text in texts]
+                vectors = {}
+                missing = {}
+                for key, text in zip(keys, texts):
+                    if key in vectors or key in missing:
+                        continue
+                    row = connection.execute("SELECT vector FROM embeddings WHERE model=? AND dim=? AND hash=?",
+                                             (self.model_id, self.dim, key)).fetchone()
+                    if row:
+                        vectors[key] = struct.unpack(f'<{self.dim}f', row[0])
+                    else:
+                        missing[key] = text
+                items = list(missing.items())
+                for start in range(0, len(items), 64):
+                    batch = items[start:start + 64]
+                    fresh = self._embedder.embed_passages([text for _, text in batch])
+                    if len(fresh) != len(batch):
+                        raise ValueError('embedder returned an incomplete batch')
+                    for (key, _), vector in zip(batch, fresh):
+                        if len(vector) != self.dim:
+                            raise ValueError('embedder returned the wrong vector dimension')
+                        blob = struct.pack(f'<{self.dim}f', *vector)
+                        vectors[key] = struct.unpack(f'<{self.dim}f', blob)
+                        connection.execute("INSERT OR REPLACE INTO embeddings VALUES (?, ?, ?, ?)",
+                                           (self.model_id, self.dim, key, blob))
+                return [vectors[key] for key in keys]
+        finally:
+            connection.close()

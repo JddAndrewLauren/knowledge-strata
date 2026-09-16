@@ -121,6 +121,19 @@ filter expands through the aliases of every note, whatever its type.
 
 ## Storage
 
+**Root identity** - a ledger-assigned number for a resolved corpus folder,
+independent of configuration order. A raw unit's key is this number plus its
+root-relative path. Legacy ledgers require the original ordered roots to bind
+their existing numbers; no path mapping is guessed.
+
+**Refresh failure** - a scan or index update that did not complete. The last
+index snapshot is retained but is not served as current. The project retries
+the complete refresh before serving another tool request.
+
+**Read metadata** - paged transport labels, separate from exact source payloads.
+Read continuations can advance metadata before returning text. Concatenating
+`metadata` fragments reconstructs the labels; `body` reconstructs only text.
+
 **Ledger** (`.strata/ledger.db`) - durable, never dropped. Ids, versions,
 anchor identity, exact current and retired text, and corpus revision. The only
 irreplaceable per-project state besides `notes/`.

@@ -346,7 +346,11 @@ def _paginate(
         room = budget_bytes - label_bytes
         cut = _safe_char_cut(remaining, room) if room > 0 else 0
         if cut <= 0:
-            cut = _minimum_cut(remaining)  # a page always advances
+            cut = _minimum_cut(remaining)
+            if len(remaining[:cut].encode("utf-8")) > max(0, room):
+                cut = len(remaining.encode("utf-8")[:max(0, room)].decode("utf-8", errors="ignore"))
+            if not cut:
+                raise ValueError("read paragraph label exceeds the reply budget")
         pieces.append(ReadPiece(label, remaining[:cut], ""))
         return pieces, {"para": para, "char": char + cut}
     if para >= len(units):
@@ -496,6 +500,7 @@ class ReadReply:
     pieces: tuple[ReadPiece, ...]
     continuation: str | None
     reply_tokens: int = 0
+    metadata: str | None = None
 
     @property
     def body(self) -> str:
@@ -503,7 +508,10 @@ class ReadReply:
 
     def text(self) -> str:
         stream = "".join((f"{piece.label}\n" if piece.label else "") + piece.payload() for piece in self.pieces)
-        out = "\n".join(self.labels) + "\n\n" + stream if self.labels else stream
+        header = self.metadata if self.metadata is not None else ("\n".join(self.labels) + "\n\n" if self.labels else "")
+        if self.metadata:
+            header = "[metadata fragment]\n" + header + "\n[end metadata fragment]\n"
+        out = header + stream
         if self.continuation:
             if not out.endswith("\n"):
                 out += "\n"
@@ -512,8 +520,12 @@ class ReadReply:
 
 
 def _with_read_reply_tokens(reply: ReadReply) -> ReadReply:
-    draft = replace(reply, reply_tokens=0)
-    return replace(draft, reply_tokens=estimate_tokens(draft.text()))
+    for _ in range(4):
+        count = estimate_tokens(reply.text())
+        if count == reply.reply_tokens:
+            break
+        reply = replace(reply, reply_tokens=count)
+    return reply
 
 
 def _field_line(label: str, value: str) -> str:
@@ -660,26 +672,38 @@ class Index:
         embedder: Embedder,
         chunk_tokens: int = DEFAULT_CHUNK_TOKENS,
         semantic: bool = True,
+        reply_token_budget: int = REPLY_TOKEN_BUDGET,
     ):
         path = Path(path)
         is_new = not path.exists()
         self._ledger = ledger
         self._embedder = embedder
         self.chunk_tokens = chunk_tokens
+        if type(chunk_tokens) is not int or chunk_tokens <= 0:
+            raise ValueError("chunk_tokens must be a positive integer")
+        if not 2000 <= reply_token_budget <= REPLY_TOKEN_BUDGET:
+            raise ValueError("reply_token_budget must be between 2000 and 8000")
+        self.reply_token_budget = reply_token_budget
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        # `semantic=False` is the caller's own choice of lexical-only, useful
-        # to a caller and to tests isolating lexical behaviour from the
-        # always-on top-200 semantic branch. `semantic=True` with no usable
-        # sqlite-vec is not the same thing: `_load_vec` raises rather than
-        # degrading silently (issue #42).
-        self._vec_ok = self._load_vec() if semantic else False
-        if is_new:
-            self._set_meta("epoch", os.urandom(8).hex())
-            self._set_meta("revision", "0")
-        self._ensure_embedder_identity()
-        self._conn.commit()
+        try:
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute("BEGIN")
+            # `semantic=False` is the caller's own choice of lexical-only, useful
+            # to a caller and to tests isolating lexical behaviour from the
+            # always-on top-200 semantic branch. `semantic=True` with no usable
+            # sqlite-vec is not the same thing: `_load_vec` raises rather than
+            # degrading silently (issue #42).
+            self._vec_ok = self._load_vec() if semantic else False
+            if is_new or self._get_meta("epoch") is None:
+                self._set_meta("epoch", os.urandom(8).hex())
+                self._set_meta("revision", "0")
+            self._ensure_embedder_identity()
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            self._conn.close()
+            raise
 
     def close(self) -> None:
         self._conn.close()
@@ -781,6 +805,16 @@ class Index:
     # -- sync -----------------------------------------------------------------
 
     def sync(self, records: list[Record], *, complete: bool = True) -> dict:
+        """Publish a complete snapshot, or roll back and mark refresh failed."""
+        try:
+            with self._conn:
+                return self._sync(records, complete=complete)
+        except BaseException:
+            self._conn.rollback()
+            self.mark_complete(False)
+            raise
+
+    def _sync(self, records: list[Record], *, complete: bool = True) -> dict:
         """Diff by whole-record content hash: an unchanged record is
         untouched; a changed or new one is fully replaced; a vanished one is
         deleted. Paragraph embeddings are cached by exact text
@@ -790,7 +824,7 @@ class Index:
             row["ref"]: row["content_hash"] for row in self._conn.execute("SELECT ref, content_hash FROM records")
         }
         incoming = {record.ref: record for record in records}
-        changed_any = False
+        changed_any = self._get_meta("corpus_revision") != self._ledger.corpus_revision()
 
         for ref in existing.keys() - incoming.keys():
             self._delete_record(ref)
@@ -807,6 +841,7 @@ class Index:
 
         if changed_any:
             self._bump_revision()
+        self._set_meta("corpus_revision", self._ledger.corpus_revision())
         self.mark_complete(complete)
         self._conn.commit()
         return {"changed": changed_any, "records": len(incoming)}
@@ -1222,7 +1257,15 @@ class Index:
             )
 
         def fits(reply: SearchReply) -> bool:
-            return estimate_tokens(_render_reply(reply)) <= REPLY_TOKEN_BUDGET
+            next_off = {"hits": offsets["hits"] + len(reply.hits),
+                        "month": offsets["month"] + len(reply.by_month),
+                        "covered": offsets["covered"] + len(reply.covered),
+                        "chunks": offsets["chunks"] + len(reply.chunks)}
+            more = (next_off["hits"] < len(hit_specs) or next_off["month"] < len(by_month_all)
+                    or next_off["covered"] < len(covered_all) or next_off["chunks"] < len(chunks_all))
+            continuation = _encode_cursor({**cursor_base, "off": next_off}) if more else None
+            measured = _with_reply_tokens(replace(reply, continuation=continuation))
+            return estimate_tokens(measured.text()) <= self.reply_token_budget
 
         candidate = build(hit_specs_page, month_page, covered_page, chunks_page)
         # The normal page (already capped at 100/500 per list) usually fits
@@ -1256,6 +1299,8 @@ class Index:
         continuation = None
         if more:
             continuation = _encode_cursor({**cursor_base, "off": next_offsets})
+            if next_offsets == offsets:
+                raise ValueError("search scope or metadata cannot fit the reply budget; narrow the scope")
         candidate = replace(candidate, continuation=continuation)
         return _with_reply_tokens(candidate)
 
@@ -1407,37 +1452,61 @@ class Index:
     # -- read -------------------------------------------------------------------
 
     def read(self, ref: str = "", cursor: str | None = None) -> ReadReply:
-        """Verbatim text for any ref shape (design.md "Read"). A cursor
-        alone resumes its own selection and offset; ``ref`` may be omitted
-        or must match it."""
+        """Read exact payloads with independently paged metadata and bounded cursors."""
+        start_para = start_char = metadata_offset = 0
         if cursor is not None:
             state = _decode_cursor(cursor)
             if state.get("t") != "read":
-                raise CursorError(f"not a read cursor: {cursor!r}")
-            if ref and ref != state["ref"]:
+                raise CursorError("not a read cursor")
+            selected = state.get("ref") or self._get_meta("read_ref:" + state.get("ref_id", ""))
+            if not selected:
+                raise CursorError("read selection expired; restart the original read")
+            if ref and ref != selected:
                 raise CursorError("a cursor resumes its own selection alone; ref must match or be omitted")
             if state["rev"] != self.index_revision:
-                raise CursorError(
-                    f"index revision changed since this cursor was issued; restart read({state['ref']!r})"
-                )
-            ref = state["ref"]
+                raise CursorError("index revision changed since this cursor was issued; restart the original read")
+            ref = selected
             start_para, start_char = state["off"]["para"], state["off"]["char"]
-        else:
-            start_para = start_char = 0
+            metadata_offset = state.get("meta", 0)
 
         parsed = refs.parse(ref)
         labels, units = self._read_selection(parsed)
+        header = "\n".join(labels) + "\n\n" if labels else ""
+        large_metadata = len(header.encode("utf-8")) > 4000
+        selection = {"ref": ref}
+        if len(ref.encode("utf-8")) > 512:
+            key = hashlib.sha256(ref.encode("utf-8")).hexdigest()
+            self._set_meta("read_ref:" + key, ref)
+            self._conn.commit()
+            selection = {"ref_id": key}
 
-        # The whole serialized reply shares the budget: labels first, then
-        # headroom for the continuation and reply_tokens lines.
-        labels_bytes = sum(len(label.encode("utf-8")) + 1 for label in labels)
-        budget_bytes = REPLY_TOKEN_BUDGET * 4 - labels_bytes - 400
-        pieces, next_off = _paginate(units, start_para, start_char, budget_bytes)
-        continuation = None
-        if next_off is not None:
-            continuation = _encode_cursor({"t": "read", "rev": self.index_revision, "ref": ref, "off": next_off})
-        reply = ReadReply(ref=ref, labels=tuple(labels), pieces=tuple(pieces), continuation=continuation)
-        return _with_read_reply_tokens(reply)
+        def continuation(off, meta):
+            return _encode_cursor({"t": "read", "rev": self.index_revision,
+                                   **selection, "off": off, "meta": meta})
+
+        # Reserve transport space, then check the exact rendered reply below.
+        budget = self.reply_token_budget * 4 - 1000
+        while budget > 0:
+            if large_metadata and metadata_offset < len(header):
+                remaining = header[metadata_offset:]
+                cut = _safe_char_cut(remaining, budget)
+                if not cut:
+                    cut = len(remaining.encode("utf-8")[:budget].decode("utf-8", errors="ignore"))
+                end = metadata_offset + cut
+                next_cursor = continuation({"para": start_para, "char": start_char}, end)
+                reply = ReadReply(ref, (), (), next_cursor, metadata=header[metadata_offset:end])
+            else:
+                shown_labels = () if large_metadata else tuple(labels)
+                label_bytes = 0 if large_metadata else len(header.encode("utf-8"))
+                pieces, next_off = _paginate(units, start_para, start_char, budget - label_bytes)
+                next_cursor = continuation(next_off, metadata_offset) if next_off else None
+                reply = ReadReply(ref, shown_labels, tuple(pieces), next_cursor,
+                                  metadata="" if large_metadata else None)
+            reply = _with_read_reply_tokens(reply)
+            if estimate_tokens(reply.text()) <= self.reply_token_budget:
+                return reply
+            budget -= max(256, (estimate_tokens(reply.text()) - self.reply_token_budget) * 4)
+        raise ValueError("read cannot fit its transport metadata")
 
     def _read_selection(self, parsed: "refs.Ref") -> tuple[list[str], list[tuple[str | None, str]]]:
         """The selection's transport labels (the ref line, then markers) and

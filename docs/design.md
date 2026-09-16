@@ -520,3 +520,24 @@ support. Continue independently settled planning while the report is pending.
 5. index: sync, then search with the header, then read.
 6. server: two tools. cli: init and index.
 7. skill and reader agent.
+
+## Implementation amendment: refresh and root identity
+
+Root numbers are now persisted against resolved folders in the durable ledger,
+so configuration order cannot swap source identities. Overlapping roots are
+deduplicated by physical file identity. Legacy roots require an explicit original
+ordered mapping. Source scans publish ledger changes only after successful
+completion; missing/inaccessible roots are failures, not empty archives.
+
+The project runtime serializes refresh and reads across threads and processes.
+A `.strata/refresh.lock` file is ignored in Git alongside `.strata/cache/`; OS locks
+release after a crash. A failed refresh serves no current results. Index changes
+roll back together, and a subsequent refresh reconciles any ledger/index mismatch.
+
+Read metadata may occupy separate labeled pages. Opaque read continuations use
+compact stored selections for oversized refs; metadata fragments are never source
+payloads. Model-specific passage embeddings share the per-user conversion store.
+
+The implemented CLI is `strata init`, `strata index`, and `strata serve --project
+PATH`. The stdio server uses the official MCP SDK 1.x. Operational measurements
+and outstanding host/platform acceptance are recorded under `docs/evidence/`.

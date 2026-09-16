@@ -25,6 +25,7 @@ import sqlite3
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 
 from strata import refs
@@ -130,6 +131,7 @@ CREATE TABLE IF NOT EXISTS units (
     sha256 TEXT,
     deleted INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS roots (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS versions (
     unit_id TEXT NOT NULL REFERENCES units(id),
     n INTEGER NOT NULL,
@@ -179,9 +181,51 @@ class Ledger:
         if "dating_version" not in columns:
             self._conn.execute("ALTER TABLE corpus_revision ADD COLUMN dating_version INTEGER")
         self._conn.commit()
+        self._transaction_depth = 0
 
     def close(self) -> None:
         self._conn.close()
+
+    @contextmanager
+    def transaction(self):
+        """Nested ledger operations commit only at the outer scan boundary."""
+        outer = self._transaction_depth == 0
+        self._transaction_depth += 1
+        try:
+            if outer:
+                self._conn.execute("BEGIN")
+            yield
+            if outer:
+                self._conn.commit()
+        except BaseException:
+            if outer:
+                self._conn.rollback()
+            raise
+        finally:
+            self._transaction_depth -= 1
+
+    def root_ids(self, paths: Sequence[str], *, legacy_roots: Sequence[str] | None = None) -> dict[str, int]:
+        """Bind resolved roots without reinterpreting existing source keys."""
+        with self.transaction():
+            existing = dict(self._conn.execute("SELECT path, id FROM roots"))
+            legacy = [path for path in self.known_units() if re.match(r"^\d{3,}/", path)]
+            if not existing and legacy:
+                if legacy_roots is None:
+                    raise ValueError("legacy ledger needs original ordered roots; use --legacy-root for each original root")
+                if len(set(legacy_roots)) != len(legacy_roots):
+                    raise ValueError("legacy roots must be unique and in their original deduplicated order")
+                if any(int(path.split('/')[0]) >= len(legacy_roots) for path in legacy):
+                    raise ValueError("legacy root mapping does not cover every stored root number")
+                for number, path in enumerate(legacy_roots):
+                    self._conn.execute("INSERT INTO roots (id, path) VALUES (?, ?)", (number, path))
+                existing = dict(self._conn.execute("SELECT path, id FROM roots"))
+            next_id = max(existing.values(), default=-1) + 1
+            for path in paths:
+                if path not in existing:
+                    self._conn.execute("INSERT INTO roots (id, path) VALUES (?, ?)", (next_id, path))
+                    existing[path] = next_id
+                    next_id += 1
+            return {path: existing[path] for path in paths}
 
     # -- registration ------------------------------------------------------
 
@@ -190,7 +234,7 @@ class Ledger:
         seen before in sorted path order (ADR-0001) and never reusing a
         retired one. Idempotent: an already-known path (deleted or not)
         keeps its id."""
-        with self._conn:
+        with self.transaction():
             existing = {row["path"]: row["id"] for row in self._conn.execute("SELECT path, id FROM units")}
             wanted = list(dict.fromkeys(paths))
             new_paths = sorted(path for path in wanted if path not in existing)
@@ -237,7 +281,7 @@ class Ledger:
         cannot see for itself (CONTEXT.md: corpus revision advances on it
         too) even when content and converter are unchanged."""
         paragraphs = list(paragraphs)
-        with self._conn:
+        with self.transaction():
             row = self._conn.execute(
                 "SELECT id, sha256, deleted FROM units WHERE path = ?", (path,)
             ).fetchone()
@@ -347,7 +391,7 @@ class Ledger:
         """A raw unit has vanished: retire every live anchor with its exact
         text, mark the unit deleted, never remove its row or anchors
         (ADR-0001). A no-op (``changed=False``) if already deleted."""
-        with self._conn:
+        with self.transaction():
             row = self._conn.execute(
                 "SELECT id, deleted FROM units WHERE path = ?", (path,)
             ).fetchone()
@@ -512,7 +556,7 @@ class Ledger:
     def set_dating_version(self, version: int) -> None:
         """Record the dating ruleset version just applied, so the next sync
         can tell whether it has changed."""
-        with self._conn:
+        with self.transaction():
             self._conn.execute("UPDATE corpus_revision SET dating_version = ? WHERE id = 1", (version,))
 
     # -- internals -----------------------------------------------------------

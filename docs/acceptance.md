@@ -1,8 +1,10 @@
 # Required acceptance: accessible memory and a simple user journey
 
-Status: **open, not demonstrated**. This document records required implementation
-tests and demonstrations. No software tests were executed in this planning
-revision. Closed decision tickets settle contracts, not acceptance evidence.
+Status: **open, partially demonstrated**. This document records required implementation
+tests and demonstrations. Current software, retrieval, host-recovery, and scale
+evidence is in [the implementation report](evidence/README.md). Clean-platform
+and complete host journeys remain outstanding. Closed decision tickets settle
+contracts, not acceptance evidence.
 The [cross-module GitHub gate #22](https://github.com/JddAndrewLauren/knowledge-strata/issues/22)
 must remain open until the evidence below exists.
 
