@@ -358,7 +358,10 @@ past.
 
 Each chapter write updates the bounded current overview in `notes/project.md`:
 dates covered, people active, threads opened or closed, themes touched, and
-links to supporting notes and manuscript locations. Keep it at most 2,000 words,
+links to supporting notes and manuscript locations. It also carries the user's
+standing decisions: explicit rulings on the book or the work, dated with where
+they were decided, applied before any manuscript write, superseded in place and
+never rotated to history. Keep it at most 2,000 words,
 moving older entries to searchable `notes/history/` notes before exceeding that
 limit. Preserve links, citations, corrections and unfinished work. Ordinary note
 loading uses `read` continuations and the current session budget.

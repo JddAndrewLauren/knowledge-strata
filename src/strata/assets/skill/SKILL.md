@@ -123,9 +123,10 @@ to `read`. Retrieval alone requires no note update or manuscript reading.
 
 ## Output
 
-Before writing manuscript text, read `.strata/config.yaml` with the host's Read
-tool. Resolve `manuscript/` refs against its configured manuscript folder, which
-may be outside the project; do not create a second manuscript at a guessed path.
+Before writing or editing manuscript text, read `.strata/config.yaml` with the
+host's Read tool and apply the standing decisions in `notes/project.md`.
+Resolve `manuscript/` refs against its configured manuscript folder, which may
+be outside the project; do not create a second manuscript at a guessed path.
 
 Output is anything produced from the input: an answer, a note, manuscript
 text. Use the reading depth appropriate to the request above.
@@ -142,7 +143,12 @@ text. Use the reading depth appropriate to the request above.
   from `read` output.
 - **Record.** Every manuscript change updates
   `notes/project.md`: dates covered, people active, threads opened or closed,
-  themes touched, file and heading. Record new supported facts or corrections
+  themes touched, file and heading. When the user gives or corrects a ruling on
+  the book or the work (naming, voice, tense, what to leave out, spelling, how
+  much to quote), add it to the overview's standing decisions: dated, where it
+  was decided (chapter or task), in the user's terms. Only rulings the user
+  stated; never an inferred preference, and never a fact about the archive.
+  Record new supported facts or corrections
   about a thing in its note (see *Notes*). Commit once at task end.
 
 ## Fan-out
@@ -216,7 +222,10 @@ when none fits. Reserved: `notes/project.md` and `notes/digest/`.
   or copy a new revision onto an old digest. The user never edits frontmatter.
 - **Project overview.** Keep `notes/project.md` within 2,000 words. Move older
   entries to searchable `notes/history/` before exceeding the cap, retaining
-  citations, correction history and links. Keep current threads and a recovery
+  citations, correction history and links. Standing decisions never move to
+  history and count toward the cap: rulings, not rationale. A changed ruling
+  supersedes the old one in place; strike the old line through and keep it.
+  Keep current threads and a recovery
   note link in the overview. Load ordinary notes through `read` pages too.
 - **Body.** Dated bullets with refs. Short and factual; a note is memory, not
   prose.
@@ -244,6 +253,15 @@ aliases: [Dave, D. Fuller, dave.fuller@example.com]
 - **Retired anchors**: `read` shows the text the citation meant; use it. For
   current wording, search afresh and cite the new anchor. Never substitute a
   neighbour.
+- **Citation warnings**: reading a note checks its source refs. Act on each
+  `warning: citation` before relying on the note, within this task. `does not
+  exist`: fix the ref from evidence read in this task, or drop the claim; never
+  guess a replacement. `retired at vN`: the evidence changed after the note was
+  written; read the retired anchor and the current record, and if the claim no
+  longer holds, mark it superseded in place and cite the new evidence. `left the
+  corpus`: the source is gone; the claim rests on its last read text.
+  `reversed`: the range runs backwards in the source; read both ends and
+  rewrite it in document order.
 
 ## Reading budget
 

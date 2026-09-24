@@ -95,6 +95,15 @@ _PARAGRAPH = re.compile(
 )
 _ANCHOR = re.compile(r"(?:p|\u00b6)\s*(?P<number>\d+)", re.IGNORECASE)
 _OCCURRENCE = re.compile(r"\((?P<n>\d+)\)$")
+# A source ref inside prose: the id, then optionally the `_PARAGRAPH` shape,
+# which may wrap onto the next line as a note paragraph keeps its single line
+# breaks. A tail dash counts only where no word follows, so `p17 - the call`
+# stays a single anchor.
+_SOURCE_IN_TEXT = re.compile(
+    r"(?<![\w-])SRC-\d{6}(?!\d)"
+    r"(?:[\s-]*(?:p|\u00b6)\s*\d+(?:-(?:\d+|(?!\w)))?(?!\w))?",
+    re.IGNORECASE,
+)
 
 
 def anchor(number: int) -> str:
@@ -143,6 +152,16 @@ def parse(text: str) -> Ref:
     if hash_:
         return _manuscript(path, heading)
     return PathRef(_repository_path(text))
+
+
+def find_source_refs(text: str) -> list[SourceRef]:
+    """Every source ref written in free text, in order, read through ``parse``.
+
+    Covers the forms a note cites: ``SRC-000184 p17``, ``p17-22``, ``p17-``,
+    the bare record, and several in one parenthesis separated by ``;``. A
+    malformed id (``SRC-184``) is not a ref and is not returned.
+    """
+    return [parse(match.group(0)) for match in _SOURCE_IN_TEXT.finditer(text)]
 
 
 def _source(id: str, rest: str) -> SourceRef:

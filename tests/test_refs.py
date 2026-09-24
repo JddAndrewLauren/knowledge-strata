@@ -4,7 +4,7 @@ offending part. Strings only, no files."""
 
 import pytest
 
-from strata.refs import BadRef, ManuscriptRef, PathRef, SourceRef, anchor, parse, render, split_anchor
+from strata.refs import BadRef, ManuscriptRef, PathRef, SourceRef, anchor, find_source_refs, parse, render, split_anchor
 
 P17 = SourceRef("SRC-000184", anchor=17)
 
@@ -153,3 +153,52 @@ def test_direct_construction_obeys_the_same_rules_as_parse(build):
 def test_range_order_is_not_this_modules_question():
     """Document order, not numeric order, decides a range (ADR-0001)."""
     assert parse("SRC-000184 p22-17") == SourceRef("SRC-000184", 22, end=17)
+
+
+# -- source refs in free text (issue #65) --------------------------------------
+
+
+def test_find_source_refs_recognizes_every_taught_form():
+    text = (
+        "- 2001-06-14  Moved the call. (SRC-000184 p17)\n"
+        "- A run (SRC-000184 p17-22), a tail (SRC-000185 p3-) and a record (SRC-000186).\n"
+        "- Two at once (SRC-000187 p2; SRC-000188 p4-6; SRC-000189)."
+    )
+    assert find_source_refs(text) == [
+        SourceRef("SRC-000184", 17),
+        SourceRef("SRC-000184", 17, end=22),
+        SourceRef("SRC-000185", 3, tail=True),
+        SourceRef("SRC-000186"),
+        SourceRef("SRC-000187", 2),
+        SourceRef("SRC-000188", 4, end=6),
+        SourceRef("SRC-000189"),
+    ]
+
+
+def test_find_source_refs_reads_a_ref_wrapped_onto_the_next_line():
+    assert find_source_refs("the call (SRC-000184\n  p17-22) moved") == [SourceRef("SRC-000184", 17, end=22)]
+
+
+def test_find_source_refs_reads_the_lenient_forms_parse_accepts():
+    assert find_source_refs("see src-000184-p17 and SRC-000184P18") == [
+        SourceRef("SRC-000184", 17),
+        SourceRef("SRC-000184", 18),
+    ]
+
+
+def test_find_source_refs_does_not_run_on_into_the_prose():
+    assert find_source_refs("SRC-000184 - pending review, SRC-000185 p17 - the call") == [
+        SourceRef("SRC-000184"),
+        SourceRef("SRC-000185", 17),
+    ]
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "Moved the Friday schedule after the Portland call.",
+    "See notes/person/dave-fuller.md and manuscript/ch24.md # The Letter.",
+    "A short id SRC-184 p17 or a long one SRC-0001840 is not a ref.",
+    "Page p17 of the SRC report.",
+])
+def test_prose_without_source_refs_finds_none(text):
+    assert find_source_refs(text) == []

@@ -1563,9 +1563,55 @@ class Index:
         if record_row is None:
             raise BadRef(f"no such record: {parsed.path}")
         labels = [self._read_header_line(parsed.path, record_row)]
+        paragraphs = self._paragraph_texts(parsed.path)
         if record_row["kind"] == "note":
             labels += [f"warning: {warning}" for warning in json.loads(record_row["warnings_json"])]
-        return labels, [(None, text) for text in self._paragraph_texts(parsed.path)]
+            labels += [f"warning: {warning}" for warning in self._citation_warnings(paragraphs)]
+        return labels, [(None, text) for text in paragraphs]
+
+    def _citation_warnings(self, paragraphs: list[str]) -> list[str]:
+        """One warning per problem with a note's source citations, checked
+        against the ledger now and never stored: an unchanged note is not
+        re-synced, so a stored result would miss an anchor that retires
+        later (issue #65). Citing a retired anchor is legal (ADR-0001);
+        its warning is advice to recheck the claim, not an error."""
+        cited = list(dict.fromkeys(ref for text in paragraphs for ref in refs.find_source_refs(text)))
+        if not cited:
+            return []
+        deleted = dict(self._ledger.known_units().values())
+        warnings: list[str] = []
+        for ref in cited:
+            canonical = refs.render(ref)
+            if ref.id not in deleted:
+                warnings.append(f"citation {canonical} does not exist")
+                continue
+            if ref.anchor is None:
+                if deleted[ref.id]:
+                    warnings.append(f"citation {canonical}: the source has left the corpus")
+                continue
+            order = self._ledger.live_anchors(ref.id)
+            live = set(order)
+            if ref.end in live and ref.anchor in live and order.index(ref.anchor) > order.index(ref.end):
+                warnings.append(
+                    f"citation {canonical} is reversed: {refs.anchor(ref.anchor)} comes after "
+                    f"{refs.anchor(ref.end)} in the source"
+                )
+                continue
+            for number in (ref.anchor, ref.end):
+                if number is None or number in live:
+                    continue
+                endpoint = refs.render(refs.SourceRef(ref.id, anchor=number))
+                named = f"citation {canonical}" if endpoint == canonical else f"citation {canonical}: {endpoint}"
+                try:
+                    retired = self._ledger.retired_anchor(endpoint)
+                except ValueError:
+                    warnings.append(f"{named} does not exist")
+                    continue
+                warnings.append(
+                    f"{named} retired at v{retired.retired_v} ({retired.at}); "
+                    "the evidence changed after this note was written - recheck the claim"
+                )
+        return list(dict.fromkeys(warnings))
 
     def _read_manuscript_section(self, parsed: "refs.ManuscriptRef") -> tuple[list[str], list[tuple[str | None, str]]]:
         record_row = self._conn.execute("SELECT * FROM records WHERE ref = ?", (parsed.path,)).fetchone()
