@@ -175,6 +175,10 @@ def test_find_source_refs_recognizes_every_taught_form():
     ]
 
 
+def test_find_source_refs_reads_a_ref_wrapped_onto_the_next_line():
+    assert find_source_refs("the call (SRC-000184\n  p17-22) moved") == [SourceRef("SRC-000184", 17, end=22)]
+
+
 def test_find_source_refs_reads_the_lenient_forms_parse_accepts():
     assert find_source_refs("see src-000184-p17 and SRC-000184P18") == [
         SourceRef("SRC-000184", 17),

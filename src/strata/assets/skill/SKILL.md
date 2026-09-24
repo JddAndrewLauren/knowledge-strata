@@ -260,6 +260,8 @@ aliases: [Dave, D. Fuller, dave.fuller@example.com]
   written; read the retired anchor and the current record, and if the claim no
   longer holds, mark it superseded in place and cite the new evidence. `left the
   corpus`: the source is gone; the claim rests on its last read text.
+  `reversed`: the range runs backwards in the source; read both ends and
+  rewrite it in document order.
 
 ## Reading budget
 

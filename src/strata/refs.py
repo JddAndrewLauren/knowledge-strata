@@ -95,12 +95,13 @@ _PARAGRAPH = re.compile(
 )
 _ANCHOR = re.compile(r"(?:p|\u00b6)\s*(?P<number>\d+)", re.IGNORECASE)
 _OCCURRENCE = re.compile(r"\((?P<n>\d+)\)$")
-# A source ref inside prose: the id, then optionally the `_PARAGRAPH` shape
-# kept to one line. A tail dash counts only where no word follows, so
-# `p17 - the call` stays a single anchor.
+# A source ref inside prose: the id, then optionally the `_PARAGRAPH` shape,
+# which may wrap onto the next line as a note paragraph keeps its single line
+# breaks. A tail dash counts only where no word follows, so `p17 - the call`
+# stays a single anchor.
 _SOURCE_IN_TEXT = re.compile(
     r"(?<![\w-])SRC-\d{6}(?!\d)"
-    r"(?:[ \t-]*(?:p|\u00b6)[ \t]*\d+(?:-(?:\d+|(?!\w)))?(?!\w))?",
+    r"(?:[\s-]*(?:p|\u00b6)\s*\d+(?:-(?:\d+|(?!\w)))?(?!\w))?",
     re.IGNORECASE,
 )
 

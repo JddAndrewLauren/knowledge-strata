@@ -1589,7 +1589,14 @@ class Index:
                 if deleted[ref.id]:
                     warnings.append(f"citation {canonical}: the source has left the corpus")
                 continue
-            live = set(self._ledger.live_anchors(ref.id))
+            order = self._ledger.live_anchors(ref.id)
+            live = set(order)
+            if ref.end in live and ref.anchor in live and order.index(ref.anchor) > order.index(ref.end):
+                warnings.append(
+                    f"citation {canonical} is reversed: {refs.anchor(ref.anchor)} comes after "
+                    f"{refs.anchor(ref.end)} in the source"
+                )
+                continue
             for number in (ref.anchor, ref.end):
                 if number is None or number in live:
                     continue

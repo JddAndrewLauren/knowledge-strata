@@ -105,6 +105,26 @@ def test_a_range_endpoint_that_never_existed_warns(index, ledger):
     ]
 
 
+def test_a_reversed_range_warns_by_document_order_not_by_number(index, ledger):
+    _source(ledger)
+    src = _source(ledger, ("One.", "Two.", "New.", "Three."))  # New. is p4, before p3
+    note = make_note("notes/person/dave.md", [f"- Back. ({src.ref} p3-1)", f"- On. ({src.ref} p4-3)"], title="Dave")
+    index.sync([src, note])
+    assert _citation_warnings(index.read(note.ref)) == [
+        f"warning: citation {src.ref} p3-1 is reversed: p3 comes after p1 in the source"
+    ]
+
+
+def test_a_citation_wrapped_between_id_and_anchor_is_still_checked(index, ledger):
+    v1 = _source(ledger)
+    v2 = _source(ledger, ("One.", "Two, changed.", "Three."))
+    note = make_note("notes/person/dave.md", [f"- Said two, as the record shows ({v1.ref}\n  p2)."], title="Dave")
+    index.sync([v2, note])
+
+    [warning] = _citation_warnings(index.read(note.ref))
+    assert warning.startswith(f"warning: citation {v1.ref} p2 retired at v2")
+
+
 def test_a_note_citing_only_live_refs_gets_no_citation_warning(index, ledger):
     src = _source(ledger)
     note = make_note(
@@ -213,5 +233,5 @@ def test_a_note_with_more_bad_citations_than_one_reply_holds_pages_every_warning
 def test_the_skill_explains_each_citation_warning_and_the_packaged_copy_matches_the_draft():
     assert SKILL_ASSET.read_bytes() == SKILL_DRAFT.read_bytes()
     skill = " ".join(SKILL_DRAFT.read_text(encoding="utf-8").split())
-    for wording in ("warning: citation", "does not exist", "retired at vN", "left the corpus"):
+    for wording in ("warning: citation", "does not exist", "retired at vN", "left the corpus", "reversed"):
         assert wording in skill
