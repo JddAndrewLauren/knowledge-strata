@@ -244,6 +244,13 @@ aliases: [Dave, D. Fuller, dave.fuller@example.com]
 - **Retired anchors**: `read` shows the text the citation meant; use it. For
   current wording, search afresh and cite the new anchor. Never substitute a
   neighbour.
+- **Citation warnings**: reading a note checks its source refs. Act on each
+  `warning: citation` before relying on the note, within this task. `does not
+  exist`: fix the ref from evidence read in this task, or drop the claim; never
+  guess a replacement. `retired at vN`: the evidence changed after the note was
+  written; read the retired anchor and the current record, and if the claim no
+  longer holds, mark it superseded in place and cite the new evidence. `left the
+  corpus`: the source is gone; the claim rests on its last read text.
 
 ## Reading budget
 
