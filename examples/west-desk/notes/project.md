@@ -10,6 +10,14 @@ An invented memoir of the west power desk at Meridian, Houston, April 2001
 to early 2002, told by Ruth Kessler. Three chapters exist. The archive is
 the desk's mail, memos and journal entries under `sources/`.
 
+## Standing decisions
+
+- 2026-08-03 (chapter 1) Ruth tells it: first person, past tense.
+- 2026-08-03 (chapter 1) Leave out Ruth's family; the book stays on the desk.
+- ~~2026-08-11 (chapter 2) Quote mail in full when it matters.~~
+- 2026-08-19 (chapter 3) Quote mail a line or two at most; paraphrase the rest.
+- 2026-08-19 (chapter 3) British spelling: reorganisation, programme.
+
 ## Chapters written
 
 - `manuscript/ch01-the-desk.md # The room` to `# The checklist`: covers
