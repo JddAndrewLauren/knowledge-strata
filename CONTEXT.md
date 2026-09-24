@@ -105,7 +105,10 @@ are the starting set. Two names are reserved because code depends on them:
 **Project note** - `notes/project.md`, the one note the skill reads first.
 A current overview of at most 2,000 words, updated after chapter writes. Older
 entries move to searchable history notes with links and citations preserved.
-Created by init, never renamed; loaded through bounded `read` pages.
+Its **standing decisions** section holds the user's explicit rulings on the book
+or the work (naming, voice, spelling, what to leave out), each dated with where
+it was decided. They never move to history; a changed ruling supersedes the old
+one in place, which stays struck through. Created by init, never renamed; loaded through bounded `read` pages.
 
 **Digest** - a note under `notes/digest/`, named by its window, written by a
 reader for an assignment, or saved by the caller as a completed window aggregate.
